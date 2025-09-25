@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Movie release Telegram bot.
-Notifies about today's movie premieres.
+Notifies about today's most popular English-language movie premieres.
 """
 
 import os
@@ -16,15 +16,29 @@ from telegram.ext import (
     PicklePersistence,
     ContextTypes,
 )
+import translators as ts
+
+# --- Вспомогательная функция для перевода ---
+def translate_text_blocking(text: str, to_lang='ru') -> str:
+    """A blocking function that translates text."""
+    if not text:
+        return ""
+    try:
+        # Используем Google-переводчик
+        return ts.translate_text(text, translator='google', to_language=to_lang)
+    except Exception as e:
+        print(f"[ERROR] Translators library failed: {e}")
+        # В случае ошибки возвращаем оригинальный текст
+        return text
 
 # --- CONFIG (from env) ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY") # <-- ИЗМЕНЕНО: используем ключ TMDb
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN or not TMDB_API_KEY:
     raise RuntimeError("One or more environment variables are not set!")
 
-# --- НОВЫЕ ФУНКЦИИ для работы с TMDb ---
+# --- Функции для работы с TMDb ---
 
 def _get_todays_movie_premieres_blocking(limit=5):
     """
@@ -33,13 +47,13 @@ def _get_todays_movie_premieres_blocking(limit=5):
     """
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     
-    # Документация по эндпоинту: https://developer.themoviedb.org/reference/discover-movie
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {
         "api_key": TMDB_API_KEY,
-        "language": "ru-RU", # Сразу запрашиваем данные на русском
+        "language": "en-US", # <-- Всегда запрашиваем на английском
         "sort_by": "popularity.desc",
         "include_adult": "false",
+        "with_original_language": "en", # <-- Фильтр: только англоязычные фильмы
         "primary_release_date.gte": today_str,
         "primary_release_date.lte": today_str,
     }
@@ -48,7 +62,6 @@ def _get_todays_movie_premieres_blocking(limit=5):
     r.raise_for_status()
     results = r.json().get("results", [])
     
-    # Ограничиваем количество результатов
     return results[:limit]
 
 def _format_movie_message(movie: dict):
@@ -57,14 +70,12 @@ def _format_movie_message(movie: dict):
     overview = movie.get("overview", "Описание отсутствует.")
     poster_path = movie.get("poster_path")
     
-    # Формируем полную ссылку на постер
     poster_url = f"https://image.tmdb.org/t/p/w780{poster_path}" if poster_path else None
     
     rating = movie.get("vote_average", 0)
     movie_id = movie.get("id")
     movie_url = f"https://www.themoviedb.org/movie/{movie_id}" if movie_id else None
 
-    # Формируем текст сообщения
     text = f"🎬 *Сегодня премьера: {title}*\n\n"
     if rating > 0:
         text += f"*Рейтинг:* {rating:.1f}/10 ⭐\n\n"
@@ -77,11 +88,10 @@ def _format_movie_message(movie: dict):
 # --- ОСНОВНАЯ ЛОГИКА ОТПРАВКИ ---
 
 async def send_premieres_to_chat(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Fetches and sends movie premieres to a specific chat."""
+    """Fetches, TRANSLATES, and sends movie premieres to a specific chat."""
     app: Application = context.application
     
     try:
-        # Запускаем блокирующий сетевой запрос в отдельном потоке
         movies = await asyncio.to_thread(_get_todays_movie_premieres_blocking)
     except Exception as e:
         print(f"[ERROR] TMDb request failed for chat {chat_id}: {e}")
@@ -89,13 +99,24 @@ async def send_premieres_to_chat(chat_id: int, context: ContextTypes.DEFAULT_TYP
         return
 
     if not movies:
-        await app.bot.send_message(chat_id=chat_id, text="🎬 Значимых премьер на сегодня не найдено.")
+        await app.bot.send_message(chat_id=chat_id, text="🎬 Значимых англоязычных премьер на сегодня не найдено.")
         return
         
     for movie in movies:
+        # --- Перевод данных ---
+        original_title = movie.get("title", "No Title")
+        original_overview = movie.get("overview", "No overview available.")
+
+        translated_title = await asyncio.to_thread(translate_text_blocking, original_title)
+        translated_overview = await asyncio.to_thread(translate_text_blocking, original_overview)
+        
+        movie["title"] = translated_title
+        movie["overview"] = translated_overview
+        # --- Конец перевода ---
+
         text, poster = _format_movie_message(movie)
         await _send_to_chat(app, chat_id, text, poster)
-        await asyncio.sleep(0.8) # Небольшая задержка между сообщениями
+        await asyncio.sleep(1.0)
 
 async def _send_to_chat(app: Application, chat_id: int, text: str, photo_url: str | None):
     """A helper function to send a message with or without a photo."""
@@ -112,14 +133,13 @@ async def _send_to_chat(app: Application, chat_id: int, text: str, photo_url: st
 async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
     """The actual job that runs daily."""
     print(f"[{datetime.now().isoformat()}] Running scheduled daily_check_job")
-    # bot_data хранится благодаря PicklePersistence
     chat_ids = context.bot_data.get("chat_ids", set())
     if not chat_ids:
         print("[INFO] No registered chats; skipping.")
         return
         
     print(f"[INFO] Sending daily premieres to {len(chat_ids)} chats.")
-    for chat_id in chat_ids:
+    for chat_id in list(chat_ids):
         await send_premieres_to_chat(chat_id, context)
 
 # --- ОБРАБОТЧИКИ КОМАНД TELEGRAM ---
@@ -127,13 +147,12 @@ async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command and registers the chat."""
     chat_id = update.effective_chat.id
-    # Используем set() для автоматического контроля уникальности ID
     chat_ids = context.bot_data.setdefault("chat_ids", set())
 
     if chat_id not in chat_ids:
         chat_ids.add(chat_id)
         await update.message.reply_text(
-            f"✅ Бот готов к работе! Я запомнил этот чат ({chat_id}) и буду присылать сюда ежедневные анонсы кинопремьер."
+            "✅ Бот готов к работе! Я запомнил этот чат и буду присылать сюда ежедневные анонсы кинопремьер."
         )
         print(f"[INFO] Registered chat_id {chat_id}")
     else:
@@ -160,7 +179,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- СБОРКА И ЗАПУСК ПРИЛОЖЕНИЯ ---
 def main():
     """Builds and runs the Telegram bot application."""
-    # PicklePersistence будет сохранять данные (chat_ids) в файле bot_data.pkl
     persistence = PicklePersistence(filepath="bot_data.pkl")
     
     application = (
@@ -172,13 +190,12 @@ def main():
 
     # Регистрируем команды
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("releases", premieres_command)) # <-- Команду оставил /releases для удобства
-    application.add_handler(CommandHandler("premieres", premieres_command)) # <-- Добавил синоним /premieres
+    application.add_handler(CommandHandler("releases", premieres_command))
+    application.add_handler(CommandHandler("premieres", premieres_command))
     application.add_handler(CommandHandler("stop", stop_command))
 
     # Настраиваем ежедневную задачу
-    tz = ZoneInfo("Europe/Amsterdam") # Можете поменять на свой часовой пояс
-    # Время можно поменять, например на 10 утра
+    tz = ZoneInfo("Europe/Amsterdam")
     scheduled_time = time(hour=10, minute=0, tzinfo=tz) 
     
     job_queue = application.job_queue
