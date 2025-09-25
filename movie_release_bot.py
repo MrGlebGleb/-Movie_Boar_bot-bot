@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Movie release Telegram bot with full pagination support (media & text).
+Movie release Telegram bot with full pagination and pre-caching.
 """
 
 import os
@@ -61,15 +61,25 @@ def _get_todays_movie_premieres_blocking(limit=10):
     }
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
-    # Фильтруем фильмы без постера сразу
     return [m for m in r.json().get("results", []) if m.get("poster_path")][:limit]
 
 def _get_movie_details_blocking(movie_id: int):
     url = f"https://api.themoviedb.org/3/movie/{movie_id}"
-    params = {"api_key": TMDB_API_KEY, "append_to_response": "videos"}
+    params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
     return r.json()
+
+def _parse_watch_providers(providers_data: dict) -> str:
+    results = providers_data.get("results", {}).get("RU", providers_data.get("results", {}).get("US"))
+    if not results: return "🍿 Только в кинотеатрах"
+    flatrate = results.get("flatrate")
+    buy = results.get("buy")
+    if flatrate:
+        names = [p["provider_name"] for p in flatrate[:2]]
+        return f"📺 Онлайн: {', '.join(names)}"
+    if buy: return "💻 Цифровой релиз"
+    return "🍿 Только в кинотеатрах"
 
 def _parse_trailer(videos_data: dict) -> str | None:
     for video in videos_data.get("results", []):
@@ -77,81 +87,85 @@ def _parse_trailer(videos_data: dict) -> str | None:
             return f"https://www.youtube.com/watch?v={video['key']}"
     return None
 
-# --- НОВАЯ ЛОГИКА ФОРМАТИРОВАНИЯ И ПАГИНАЦИИ ---
+# --- ФОРМАТИРОВАНИЕ И ПАГИНАЦИЯ ---
 
-async def format_movie_for_pagination(movie: dict, genres_map: dict, current_index: int, total_count: int, list_id: str):
-    """Готовит все компоненты (текст, постер, кнопки) для одного фильма."""
-    # Получаем детали (трейлер)
-    details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
-    trailer_url = _parse_trailer(details.get("videos", {}))
-    
-    # Получаем базовую информацию
-    title = movie.get("title", "No Title")
-    overview = movie.get("overview", "Описание отсутствует.")
-    poster_path = movie.get("poster_path")
-    poster_url = f"https://image.tmdb.org/t/p/w780{poster_path}" if poster_path else None
-    rating = movie.get("vote_average", 0)
-    genre_names = [genres_map.get(gid, "") for gid in movie.get("genre_ids", [])[:2]]
+async def format_movie_for_pagination(movie_data: dict, genres_map: dict, current_index: int, total_count: int, list_id: str):
+    """Готовит все компоненты (текст, постер, кнопки) для одного фильма из уже собранных данных."""
+    title = movie_data.get("title", "No Title")
+    overview = movie_data.get("overview", "Описание отсутствует.")
+    poster_url = movie_data.get("poster_url")
+    rating = movie_data.get("vote_average", 0)
+    genre_names = [genres_map.get(gid, "") for gid in movie_data.get("genre_ids", [])[:2]]
     genres_str = ", ".join(filter(None, genre_names))
+    watch_status = movie_data.get("watch_status", "Статус неизвестен")
+    trailer_url = movie_data.get("trailer_url")
 
-    # Переводим описание
-    translated_overview = await asyncio.to_thread(translate_text_blocking, overview)
-
-    # Формируем текст сообщения
-    text = f"🎬 *{title}*\n\n"
+    text = f"🎬 *Сегодня выходит: {title}*\n\n"
     if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"
+    text += f"Статус: {watch_status}\n"
     if genres_str: text += f"Жанр: {genres_str}\n"
-    text += f"\n{translated_overview}"
+    text += f"\n{overview}"
     
-    # Формируем кнопки
     keyboard = []
     nav_buttons = []
     if current_index > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}"))
-    
     nav_buttons.append(InlineKeyboardButton(f"[{current_index + 1}/{total_count}]", callback_data="noop"))
-
     if current_index < total_count - 1:
         nav_buttons.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}"))
-    
     keyboard.append(nav_buttons)
-    
     if trailer_url:
         keyboard.append([InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url)])
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    return text, poster_url, reply_markup
+    return text, poster_url, InlineKeyboardMarkup(keyboard)
 
 # --- КОМАНДЫ И ОБРАБОТЧИКИ ---
 
 async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает сессию пагинации для премьер."""
+    """Начинает сессию пагинации, предварительно загружая все данные."""
     chat_id = update.effective_chat.id
-    await update.message.reply_text("🔍 Ищу сегодняшние премьеры...")
+    await update.message.reply_text("🔍 Ищу и обрабатываю сегодняшние премьеры... Это может занять несколько секунд.")
     
     try:
-        movies = await asyncio.to_thread(_get_todays_movie_premieres_blocking)
+        # Шаг 1: Получаем базовый список фильмов
+        base_movies = await asyncio.to_thread(_get_todays_movie_premieres_blocking)
+        if not base_movies:
+            await context.bot.send_message(chat_id, text="🎬 Значимых премьер на сегодня не найдено.")
+            return
+
+        # Шаг 2: Предварительно загружаем все детали, чтобы избежать rate limit
+        enriched_movies = []
+        for movie in base_movies:
+            details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
+            overview_ru = await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
+            
+            enriched_movie_data = {
+                **movie,
+                "overview": overview_ru,
+                "watch_status": _parse_watch_providers(details.get("watch/providers", {})),
+                "trailer_url": _parse_trailer(details.get("videos", {})),
+                "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
+            }
+            enriched_movies.append(enriched_movie_data)
+            await asyncio.sleep(0.2) # Небольшая задержка между запросами
+
+        # Шаг 3: Сохраняем полный список в кэш
+        list_id = str(uuid.uuid4())
+        context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
+        
+        # Шаг 4: Отправляем первый фильм
+        text, poster, markup = await format_movie_for_pagination(
+            movie_data=enriched_movies[0],
+            genres_map=context.bot_data.get('genres', {}),
+            current_index=0,
+            total_count=len(enriched_movies),
+            list_id=list_id
+        )
+        await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+
     except Exception as e:
-        await context.bot.send_message(chat_id, text=f"Ошибка при получении данных: {e}")
-        return
-
-    if not movies:
-        await context.bot.send_message(chat_id, text="🎬 Значимых премьер на сегодня не найдено.")
-        return
-
-    list_id = str(uuid.uuid4())
-    context.bot_data.setdefault('movie_lists', {})[list_id] = movies
-    
-    text, poster, markup = await format_movie_for_pagination(
-        movie=movies[0],
-        genres_map=context.bot_data.get('genres', {}),
-        current_index=0,
-        total_count=len(movies),
-        list_id=list_id
-    )
-    
-    await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+        print(f"[ERROR] Full premiere processing failed: {e}")
+        await context.bot.send_message(chat_id, text=f"Произошла ошибка при получении данных.")
 
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает нажатия на кнопки 'Назад' и 'Вперед'."""
@@ -161,24 +175,21 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         _, list_id, new_index_str = query.data.split("_")
         new_index = int(new_index_str)
-    except (ValueError, IndexError):
-        return
+    except (ValueError, IndexError): return
 
     movies = context.bot_data.get('movie_lists', {}).get(list_id)
-
     if not movies or not (0 <= new_index < len(movies)):
-        await query.edit_message_text("Ошибка: список фильмов устарел. Запросите релизы заново: /releases.")
+        await query.edit_message_text("Ошибка: список устарел. Запросите заново: /releases.")
         return
         
     text, poster, markup = await format_movie_for_pagination(
-        movie=movies[new_index],
+        movie_data=movies[new_index],
         genres_map=context.bot_data.get('genres', {}),
         current_index=new_index,
         total_count=len(movies),
         list_id=list_id
     )
 
-    # --- ВАЖНОЕ ИЗМЕНЕНИЕ: Заменяем медиа-контент ---
     try:
         media = InputMediaPhoto(media=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN)
         await query.edit_message_media(media=media, reply_markup=markup)
@@ -186,7 +197,7 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"[WARN] Failed to edit message media: {e}")
 
 
-# --- СБОРКА И ЗАПУСК (остальные команды убраны для простоты) ---
+# --- СБОРКА И ЗАПУСК ---
 def main():
     persistence = PicklePersistence(filepath="bot_data.pkl")
     application = (
@@ -197,7 +208,7 @@ def main():
         .build()
     )
 
-    application.add_handler(CommandHandler("start", premieres_command)) # /start сразу показывает релизы
+    application.add_handler(CommandHandler("start", premieres_command))
     application.add_handler(CommandHandler("releases", premieres_command))
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
 
