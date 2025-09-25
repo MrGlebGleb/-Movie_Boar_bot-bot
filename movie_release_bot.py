@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Movie release Telegram bot with pagination.
+Movie release Telegram bot with full pagination support (media & text).
 """
 
 import os
@@ -9,7 +9,7 @@ import asyncio
 import uuid
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
-from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -51,19 +51,19 @@ if not TELEGRAM_BOT_TOKEN or not TMDB_API_KEY:
 
 # --- Функции для работы с TMDb ---
 
-def _get_todays_movie_premieres_blocking(limit=10): # <-- Лимит увеличен
+def _get_todays_movie_premieres_blocking(limit=10):
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
-        "include_adult": "false", "with_original_language": "en|es|fr|de|it", # <-- Языки расширены
+        "include_adult": "false", "with_original_language": "en|es|fr|de|it",
         "primary_release_date.gte": today_str, "primary_release_date.lte": today_str,
     }
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
-    return r.json().get("results", [])[:limit]
+    # Фильтруем фильмы без постера сразу
+    return [m for m in r.json().get("results", []) if m.get("poster_path")][:limit]
 
-# ... (Остальные функции для работы с API остаются без изменений)
 def _get_movie_details_blocking(movie_id: int):
     url = f"https://api.themoviedb.org/3/movie/{movie_id}"
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos"}
@@ -79,8 +79,12 @@ def _parse_trailer(videos_data: dict) -> str | None:
 
 # --- НОВАЯ ЛОГИКА ФОРМАТИРОВАНИЯ И ПАГИНАЦИИ ---
 
-async def format_movie_message_text_and_markup(movie: dict, genres_map: dict, current_index: int, total_count: int, list_id: str):
-    """Готовит текст, постер и кнопки для одного фильма в режиме пагинации."""
+async def format_movie_for_pagination(movie: dict, genres_map: dict, current_index: int, total_count: int, list_id: str):
+    """Готовит все компоненты (текст, постер, кнопки) для одного фильма."""
+    # Получаем детали (трейлер)
+    details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
+    trailer_url = _parse_trailer(details.get("videos", {}))
+    
     # Получаем базовую информацию
     title = movie.get("title", "No Title")
     overview = movie.get("overview", "Описание отсутствует.")
@@ -100,28 +104,26 @@ async def format_movie_message_text_and_markup(movie: dict, genres_map: dict, cu
     text += f"\n{translated_overview}"
     
     # Формируем кнопки
-    buttons = []
-    # Кнопка "Назад" (если это не первый элемент)
+    keyboard = []
+    nav_buttons = []
     if current_index > 0:
-        buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}"))
     
-    # Кнопка-счетчик
-    buttons.append(InlineKeyboardButton(f"[{current_index + 1}/{total_count}]", callback_data="noop")) # noop = no operation
+    nav_buttons.append(InlineKeyboardButton(f"[{current_index + 1}/{total_count}]", callback_data="noop"))
 
-    # Кнопка "Вперед" (если это не последний элемент)
     if current_index < total_count - 1:
-        buttons.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}"))
+        nav_buttons.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}"))
     
-    reply_markup = InlineKeyboardMarkup([buttons])
+    keyboard.append(nav_buttons)
+    
+    if trailer_url:
+        keyboard.append([InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url)])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     return text, poster_url, reply_markup
 
-
 # --- КОМАНДЫ И ОБРАБОТЧИКИ ---
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (без изменений)
-    await update.message.reply_text("Бот готов к работе. Используйте /releases для просмотра премьер.")
 
 async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Начинает сессию пагинации для премьер."""
@@ -141,7 +143,7 @@ async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     list_id = str(uuid.uuid4())
     context.bot_data.setdefault('movie_lists', {})[list_id] = movies
     
-    text, poster, markup = await format_movie_message_text_and_markup(
+    text, poster, markup = await format_movie_for_pagination(
         movie=movies[0],
         genres_map=context.bot_data.get('genres', {}),
         current_index=0,
@@ -149,10 +151,7 @@ async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         list_id=list_id
     )
     
-    if poster:
-        await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
-    else:
-        await context.bot.send_message(chat_id, text=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+    await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
 
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает нажатия на кнопки 'Назад' и 'Вперед'."""
@@ -163,17 +162,15 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _, list_id, new_index_str = query.data.split("_")
         new_index = int(new_index_str)
     except (ValueError, IndexError):
-        print(f"[ERROR] Could not parse callback_data: {query.data}")
         return
 
-    movie_lists = context.bot_data.get('movie_lists', {})
-    movies = movie_lists.get(list_id)
+    movies = context.bot_data.get('movie_lists', {}).get(list_id)
 
     if not movies or not (0 <= new_index < len(movies)):
-        await query.edit_message_text("Ошибка: список фильмов устарел или не найден. Пожалуйста, запросите релизы заново командой /releases.")
+        await query.edit_message_text("Ошибка: список фильмов устарел. Запросите релизы заново: /releases.")
         return
         
-    text, poster, markup = await format_movie_message_text_and_markup(
+    text, poster, markup = await format_movie_for_pagination(
         movie=movies[new_index],
         genres_map=context.bot_data.get('genres', {}),
         current_index=new_index,
@@ -181,17 +178,15 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         list_id=list_id
     )
 
+    # --- ВАЖНОЕ ИЗМЕНЕНИЕ: Заменяем медиа-контент ---
     try:
-        # Пытаемся отредактировать сообщение с фото. Если не получится - значит, это текстовое сообщение.
-        if query.message.photo:
-            await query.edit_message_caption(caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
-        else:
-             await query.edit_message_text(text=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+        media = InputMediaPhoto(media=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN)
+        await query.edit_message_media(media=media, reply_markup=markup)
     except Exception as e:
-        print(f"[WARN] Failed to edit message, probably unchanged: {e}")
+        print(f"[WARN] Failed to edit message media: {e}")
 
 
-# --- СБОРКА И ЗАПУСК ---
+# --- СБОРКА И ЗАПУСК (остальные команды убраны для простоты) ---
 def main():
     persistence = PicklePersistence(filepath="bot_data.pkl")
     application = (
@@ -202,11 +197,8 @@ def main():
         .build()
     )
 
-    # Регистрируем команды
-    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("start", premieres_command)) # /start сразу показывает релизы
     application.add_handler(CommandHandler("releases", premieres_command))
-    
-    # Регистрируем обработчик пагинации
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
 
     print("[INFO] Starting bot (run_polling).")
