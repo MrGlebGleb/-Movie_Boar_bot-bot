@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Movie release Telegram bot.
-Notifies about premieres with their watch availability status and a history button.
+Notifies about premieres and allows searching for historical releases.
 """
 
 import os
@@ -9,16 +9,12 @@ import requests
 import asyncio
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
-from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import constants, Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     PicklePersistence,
     ContextTypes,
-    ConversationHandler,
-    CallbackQueryHandler,
-    filters,
 )
 import translators as ts
 
@@ -37,9 +33,6 @@ TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 
 if not TELEGRAM_BOT_TOKEN or not TMDB_API_KEY:
     raise RuntimeError("One or more environment variables are not set!")
-
-# --- Определение состояний для диалога ---
-GET_YEAR = 0
 
 # --- Функции для работы с TMDb ---
 
@@ -76,15 +69,13 @@ def _get_historical_premieres_blocking(year: int, month_day: str, limit=3):
 
 def _parse_watch_providers(providers_data: dict) -> str:
     results = providers_data.get("results", {}).get("RU", providers_data.get("results", {}).get("US"))
-    if not results:
-        return "🍿 Только в кинотеатрах"
+    if not results: return "🍿 Только в кинотеатрах"
     flatrate = results.get("flatrate")
     buy = results.get("buy")
     if flatrate:
         provider_names = [p["provider_name"] for p in flatrate[:2]]
         return f"📺 Онлайн: {', '.join(provider_names)}"
-    if buy:
-        return "💻 Цифровой релиз"
+    if buy: return "💻 Цифровой релиз"
     return "🍿 Только в кинотеатрах"
 
 def _format_movie_message(movie: dict, watch_status: str) -> (str, str):
@@ -94,8 +85,7 @@ def _format_movie_message(movie: dict, watch_status: str) -> (str, str):
     poster_url = f"https://image.tmdb.org/t/p/w780{poster_path}" if poster_path else None
     rating = movie.get("vote_average", 0)
     text = f"🎬 *Сегодня премьера: {title}*\n\n"
-    if rating > 0:
-        text += f"⭐ Рейтинг: {rating:.1f}/10\n"
+    if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"
     text += f"Статус: {watch_status}\n\n"
     text += overview
     return text, poster_url
@@ -110,20 +100,9 @@ async def send_premieres_to_chat(chat_id: int, context: ContextTypes.DEFAULT_TYP
         print(f"[ERROR] TMDb discovery failed for chat {chat_id}: {e}")
         await app.bot.send_message(chat_id=chat_id, text="Не удалось получить данные о премьерах.")
         return
-
-    keyboard = [[
-        InlineKeyboardButton("📜 Посмотреть, что выходило в этот день раньше", callback_data="start_history")
-    ]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     if not movies:
-        await app.bot.send_message(
-            chat_id=chat_id,
-            text="🎬 Значимых англоязычных премьер на сегодня не найдено.",
-            reply_markup=reply_markup
-        )
+        await app.bot.send_message(chat_id=chat_id, text="🎬 Значимых англоязычных премьер на сегодня не найдено.")
         return
-
     for movie in movies:
         try:
             details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
@@ -135,8 +114,6 @@ async def send_premieres_to_chat(chat_id: int, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             print(f"[WARN] Failed to process movie ID {movie.get('id')}: {e}")
             continue
-
-    await app.bot.send_message(chat_id=chat_id, text="Хотите заглянуть в прошлое?", reply_markup=reply_markup)
 
 async def _send_to_chat(app: Application, chat_id: int, text: str, photo_url: str | None):
     try:
@@ -160,12 +137,34 @@ async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_ids = context.bot_data.setdefault("chat_ids", set())
+    
+    start_message = (
+        "✅ Бот готов к работе!\n\n"
+        "Я буду ежедневно в 14:00 по МСК присылать сюда анонсы кинопремьер.\n\n"
+        "**Доступные команды:**\n"
+        "• `/releases` — показать премьеры на сегодня.\n"
+        "• `/year <год>` — показать топ-3 фильма, вышедших в этот день в прошлом (например: `/year 1999`).\n"
+        "• `/help` — показать это сообщение.\n"
+        "• `/stop` — отписаться от рассылки."
+    )
+
     if chat_id not in chat_ids:
         chat_ids.add(chat_id)
-        await update.message.reply_text("✅ Бот готов к работе! Я буду присылать сюда ежедневные анонсы кинопремьер.")
+        await update.message.reply_text(start_message, parse_mode=constants.ParseMode.MARKDOWN)
         print(f"[INFO] Registered chat_id {chat_id}")
     else:
-        await update.message.reply_text("Этот чат уже есть в списке рассылки.")
+        await update.message.reply_text("Этот чат уже есть в списке рассылки. " + start_message, parse_mode=constants.ParseMode.MARKDOWN)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет сообщение со списком всех команд."""
+    help_text = (
+        "**Список доступных команд:**\n\n"
+        "• `/releases` — показать премьеры на сегодня.\n"
+        "• `/year <год>` — показать топ-3 фильма, вышедших в этот день в прошлом (например: `/year 1999`).\n"
+        "• `/start` — подписаться на ежедневную рассылку.\n"
+        "• `/stop` — отписаться от рассылки."
+    )
+    await update.message.reply_text(help_text, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -182,26 +181,16 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Этот чат и так не был подписан на рассылку.")
 
-# --- ДИАЛОГ ИСТОРИИ ---
-
-async def history_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        text="📅 Какой год вас интересует? Отправьте год от 1970 до 2024.\n\n"
-             "Чтобы отменить, введите /cancel."
-    )
-    return GET_YEAR
-
-async def get_year_from_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
+async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Пожалуйста, укажите год после команды.\nНапример: `/year 1999`", parse_mode=constants.ParseMode.MARKDOWN)
+        return
     try:
-        year = int(update.message.text)
-        if not (1970 <= year <= 2024):
-            raise ValueError("Год вне диапазона")
-    except ValueError:
+        year = int(context.args[0])
+        if not (1970 <= year <= 2024): raise ValueError("Год вне диапазона")
+    except (ValueError, IndexError):
         await update.message.reply_text("Пожалуйста, введите корректный год (например, 1995).")
-        return GET_YEAR
+        return
     month_day = datetime.now(timezone.utc).strftime('%m-%d')
     await update.message.reply_text(f"🔍 Ищу топ-3 релиза за {month_day}-{year}...")
     try:
@@ -211,38 +200,28 @@ async def get_year_from_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         else:
             response_text = f"📜 *Топ-3 релиза за {month_day}-{year}:*\n\n"
             for movie in movies:
-                title = await asyncio.to_thread(translate_text_blocking, movie.get('title', 'Без названия'))
+                title = movie.get('title', 'Без названия')
                 rating = movie.get('vote_average', 0)
                 response_text += f"• *{title}* (Рейтинг: {rating:.1f} ⭐)\n"
             await update.message.reply_text(response_text, parse_mode=constants.ParseMode.MARKDOWN)
     except Exception as e:
-        print(f"[ERROR] Historical search failed for chat {chat_id}: {e}")
+        print(f"[ERROR] Historical search failed: {e}")
         await update.message.reply_text("Не удалось получить данные. Попробуйте позже.")
-    return ConversationHandler.END
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Действие отменено.")
-    return ConversationHandler.END
 
 # --- СБОРКА И ЗАПУСК ---
 def main():
     persistence = PicklePersistence(filepath="bot_data.pkl")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).build()
 
-    history_conversation_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(history_start, pattern="^start_history$")],
-        states={
-            GET_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_year_from_user)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)],
-    )
-
-    application.add_handler(history_conversation_handler)
+    # Регистрируем команды
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("releases", premieres_command))
     application.add_handler(CommandHandler("premieres", premieres_command))
     application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("year", year_command))
 
+    # Настраиваем ежедневную задачу
     tz = ZoneInfo("Europe/Moscow")
     scheduled_time = time(hour=14, minute=0, tzinfo=tz)
     application.job_queue.run_daily(daily_check_job, scheduled_time, name="daily_movie_check")
