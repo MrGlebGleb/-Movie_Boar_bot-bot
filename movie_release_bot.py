@@ -38,10 +38,14 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
         r.raise_for_status()
         genres = {g['id']: g['name'] for g in r.json()['genres']}
         context.bot_data['genres'] = genres
+        # Создаем обратный словарь для поиска ID по имени
+        context.bot_data['genres_by_name'] = {v.lower(): k for k, v in genres.items()}
         print(f"[INFO] Successfully cached {len(genres)} genres.")
     except Exception as e:
         print(f"[ERROR] Could not cache genres: {e}")
         context.bot_data['genres'] = {}
+        context.bot_data['genres_by_name'] = {}
+
 
 # --- CONFIG ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -221,20 +225,31 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет кнопки для выбора жанра случайного фильма."""
-    genres = context.bot_data.get('genres', {})
-    if not genres:
+    genres_by_name = context.bot_data.get('genres_by_name', {})
+    if not genres_by_name:
         await update.message.reply_text("Жанры еще не загружены, попробуйте через минуту.")
         return
 
-    # Исправлено: Динамически берем первые 6 жанров из загруженного списка
+    # --- ИЗМЕНЕНИЕ: Курируемый список из 10 популярных жанров ---
+    target_genres = [
+        "Боевик", "Комедия", "Ужасы", "Фантастика", "Триллер", 
+        "Мелодрама", "Драма", "Приключения", "Фэнтези", "Детектив"
+    ]
     keyboard = []
     row = []
-    for genre_id, genre_name in list(genres.items())[:6]:
-        row.append(InlineKeyboardButton(genre_name, callback_data=f"random_{genre_id}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
+    for genre_name in target_genres:
+        # Ищем ID жанра в нашем кэше, приводя к нижнему регистру для надежности
+        genre_id = genres_by_name.get(genre_name.lower())
+        if genre_id:
+            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_{genre_id}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
     if row: keyboard.append(row)
+
+    if not keyboard:
+        await update.message.reply_text("Не удалось создать список жанров.")
+        return
 
     await update.message.reply_text("Выберите жанр, чтобы я подобрал для вас случайный фильм:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -276,10 +291,12 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     title_prefix = "🎬 Сегодня выходит:"
-    # Проверяем, есть ли дата релиза и отличается ли год от текущего
-    release_year = movies[new_index].get('release_date', '????')[:4]
-    if release_year.isdigit() and int(release_year) < datetime.now().year:
-        title_prefix = f"🎞️ Релиз {release_year} года:"
+    release_year_str = movies[new_index].get('release_date', '????')[:4]
+    if release_year_str.isdigit():
+        current_year = datetime.now().year
+        release_year = int(release_year_str)
+        if release_year < current_year:
+            title_prefix = f"🎞️ Релиз {release_year} года:"
 
     text, poster, markup = await format_movie_for_pagination(
         movies[new_index], context.bot_data.get('genres', {}), new_index, len(movies), list_id, title_prefix
@@ -294,7 +311,6 @@ async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
     print(f"[{datetime.now().isoformat()}] Running daily check job")
     chat_ids = context.bot_data.get("chat_ids", set())
     if not chat_ids: return
-
     try:
         base_movies = await asyncio.to_thread(_get_todays_movie_premieres_blocking, limit=3)
         if not base_movies: return
@@ -302,7 +318,6 @@ async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
         for chat_id in list(chat_ids):
             print(f"Sending daily to {chat_id}")
             for movie in enriched_movies:
-                # В ежедневной рассылке пагинация не нужна, отправляем как отдельные карточки
                 text, poster, markup = await format_movie_for_pagination(movie, context.bot_data.get('genres', {}), 0, 1, "daily", "🎬 Сегодня выходит:")
                 await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
                 await asyncio.sleep(1)
