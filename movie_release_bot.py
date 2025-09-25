@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Movie release Telegram bot with advanced random movie feature.
+Movie release Telegram bot with an advanced random movie feature including a reroll button.
 """
 
 import os
@@ -45,7 +45,6 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
         context.bot_data['genres'] = {}
         context.bot_data['genres_by_name'] = {}
 
-
 # --- CONFIG ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
@@ -54,9 +53,8 @@ if not TELEGRAM_BOT_TOKEN or not TMDB_API_KEY:
     raise RuntimeError("One or more environment variables are not set!")
 
 # --- Функции для работы с TMDb ---
-
+# ... ( _get_todays_movie_premieres_blocking, _get_historical_premieres_blocking, _get_movie_details_blocking, _parse_watch_providers, _parse_trailer без изменений) ...
 def _get_todays_movie_premieres_blocking(limit=10):
-    # ... (без изменений)
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "with_original_language": "en|es|fr|de|it", "primary_release_date.gte": today_str, "primary_release_date.lte": today_str}
@@ -65,7 +63,6 @@ def _get_todays_movie_premieres_blocking(limit=10):
     return [m for m in r.json().get("results", []) if m.get("poster_path")][:limit]
 
 def _get_historical_premieres_blocking(year: int, month_day: str, limit=3):
-    # ... (без изменений)
     target_date = f"{year}-{month_day}"
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": target_date, "primary_release_date.lte": target_date}
@@ -73,8 +70,7 @@ def _get_historical_premieres_blocking(year: int, month_day: str, limit=3):
     r.raise_for_status()
     return [m for m in r.json().get("results", []) if m.get("poster_path")][:limit]
 
-def _get_random_movie_blocking(with_genres: str, without_genres: str = None, with_original_language: str = None, without_original_language: str = None):
-    """Универсальная функция для поиска случайного фильма с гибкими фильтрами."""
+def _get_random_movie_blocking(with_genres: str, without_genres: str = None, with_original_language: str = None):
     discover_url = "https://api.themoviedb.org/3/discover/movie"
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
@@ -85,7 +81,6 @@ def _get_random_movie_blocking(with_genres: str, without_genres: str = None, wit
     }
     if without_genres: params["without_genres"] = without_genres
     if with_original_language: params["with_original_language"] = with_original_language
-    if without_original_language: params["without_original_language"] = without_original_language
 
     r = requests.get(discover_url, params=params, timeout=20)
     r.raise_for_status()
@@ -101,7 +96,6 @@ def _get_random_movie_blocking(with_genres: str, without_genres: str = None, wit
     return random.choice(results) if results else None
 
 def _get_movie_details_blocking(movie_id: int):
-    # ... (без изменений)
     url = f"https://api.themoviedb.org/3/movie/{movie_id}"
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}
     r = requests.get(url, params=params, timeout=20)
@@ -109,7 +103,6 @@ def _get_movie_details_blocking(movie_id: int):
     return r.json()
 
 def _parse_watch_providers(providers_data: dict) -> str:
-    # ... (без изменений)
     results = providers_data.get("results", {}).get("RU", providers_data.get("results", {}).get("US"))
     if not results: return "🍿 Только в кинотеатрах"
     flatrate, buy = results.get("flatrate"), results.get("buy")
@@ -120,14 +113,12 @@ def _parse_watch_providers(providers_data: dict) -> str:
     return "🍿 Только в кинотеатрах"
 
 def _parse_trailer(videos_data: dict) -> str | None:
-    # ... (без изменений)
     for video in videos_data.get("results", []):
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":
             return f"https://www.youtube.com/watch?v={video['key']}"
     return None
 
 async def _enrich_movie_data(movie: dict) -> dict:
-    # ... (без изменений)
     details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
     overview_ru = await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
     await asyncio.sleep(0.4)
@@ -135,8 +126,8 @@ async def _enrich_movie_data(movie: dict) -> dict:
 
 # --- ФОРМАТИРОВАНИЕ И ПАГИНАЦИЯ ---
 
-async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = ""):
-    """Универсальная функция форматирования для любого типа вывода."""
+async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):
+    """Универсальная функция форматирования с опциональной кнопкой 'Повторить'."""
     title, overview, poster_url = movie_data.get("title"), movie_data.get("overview"), movie_data.get("poster_url")
     rating, genre_ids = movie_data.get("vote_average", 0), movie_data.get("genre_ids", [])
     genre_names = [genres_map.get(gid, "") for gid in genre_ids[:2]]
@@ -149,7 +140,6 @@ async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix:
     text += f"\n{overview}"
     
     keyboard = []
-    # --- ИЗМЕНЕНИЕ: Добавляем блок пагинации только если нужно ---
     if is_paginated:
         nav_buttons = []
         if current_index > 0: nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}"))
@@ -157,12 +147,19 @@ async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix:
         if current_index < total_count - 1: nav_buttons.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}"))
         keyboard.append(nav_buttons)
     
-    if trailer_url: keyboard.append([InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url)])
+    action_buttons = []
+    if reroll_data:
+        action_buttons.append(InlineKeyboardButton("🔄 Повторить", callback_data=reroll_data))
+    if trailer_url:
+        action_buttons.append(InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url))
+    
+    if action_buttons:
+        keyboard.append(action_buttons)
     
     return text, poster_url, InlineKeyboardMarkup(keyboard) if keyboard else None
 
 # --- КОМАНДЫ И ОБРАБОТЧИКИ ---
-# ... (start_command, help_command, stop_command, premieres_command, year_command без изменений) ...
+# ... (start_command, help_command, stop_command, premieres_command, year_command, pagination_handler, daily_check_job без изменений) ...
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_ids = context.bot_data.setdefault("chat_ids", set())
@@ -245,77 +242,6 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] year_command failed: {e}")
         await update.message.reply_text("Произошла ошибка при поиске по году.")
 
-async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет кнопки для выбора жанра случайного фильма."""
-    genres_by_name = context.bot_data.get('genres_by_name', {})
-    if not genres_by_name:
-        await update.message.reply_text("Жанры еще не загружены, попробуйте через минуту.")
-        return
-
-    # --- ИЗМЕНЕНИЕ: Курируемый список жанров + специальные кнопки для анимации ---
-    target_genres = ["Боевик", "Комедия", "Ужасы", "Фантастика", "Триллер", "Драма", "Приключения", "Фэнтези"]
-    keyboard = []
-    row = []
-    # Сначала добавляем специальные кнопки
-    row.append(InlineKeyboardButton("Мультфильмы", callback_data="random_cartoon"))
-    row.append(InlineKeyboardButton("Аниме", callback_data="random_anime"))
-    keyboard.append(row)
-    row = [] # Начинаем новый ряд для обычных жанров
-
-    for genre_name in target_genres:
-        genre_id = genres_by_name.get(genre_name.lower())
-        if genre_id:
-            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_genre_{genre_id}"))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-    if row: keyboard.append(row)
-
-    await update.message.reply_text("Выберите категорию или жанр:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def random_genre_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатие на кнопку жанра, ищет и отправляет фильм."""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data.split("_")
-    random_type = data[1]
-    
-    genres_map = context.bot_data.get('genres', {})
-    animation_id = next((gid for gid, name in genres_map.items() if name == "мультфильм"), "16") # ID жанра "Анимация"
-
-    params = {}
-    search_query_text = ""
-
-    if random_type == "genre":
-        params["with_genres"] = data[2]
-        params["without_genres"] = animation_id
-        search_query_text = f"'{genres_map.get(int(data[2]))}'"
-    elif random_type == "cartoon":
-        params["with_genres"] = animation_id
-        params["without_original_language"] = "ja" # Исключаем японский язык
-        search_query_text = "'Мультфильм'"
-    elif random_type == "anime":
-        params["with_genres"] = animation_id
-        params["with_original_language"] = "ja" # Только японский язык
-        search_query_text = "'Аниме'"
-    
-    await query.edit_message_text(f"🔍 Подбираю случайный фильм в категории {search_query_text}...")
-    try:
-        random_movie = await asyncio.to_thread(_get_random_movie_blocking, **params)
-        if not random_movie:
-            await query.edit_message_text("🤷‍♂️ К сожалению, не удалось найти подходящий фильм. Попробуйте другую категорию.")
-            return
-
-        enriched_movie = await _enrich_movie_data(random_movie)
-        text, poster, markup = await format_movie_message(enriched_movie, genres_map, "🎲 Случайный фильм:", is_paginated=False)
-        await query.delete_message()
-        await context.bot.send_photo(query.message.chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
-    except Exception as e:
-        print(f"[ERROR] random_genre_handler failed: {e}")
-        await query.edit_message_text("Произошла ошибка при поиске фильма.")
-
-
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -329,10 +255,8 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Ошибка: список устарел. Запросите заново.")
         return
     
-    title_prefix = "🎬 Сегодня выходит:"
     release_year_str = movies[new_index].get('release_date', '????')[:4]
-    if release_year_str.isdigit() and int(release_year_str) < datetime.now().year:
-        title_prefix = f"🎞️ Релиз {release_year_str} года:"
+    title_prefix = f"🎞️ Релиз {release_year_str} года:" if release_year_str.isdigit() and int(release_year_str) < datetime.now().year else "🎬 Сегодня выходит:"
 
     text, poster, markup = await format_movie_message(
         movies[new_index], context.bot_data.get('genres', {}), title_prefix, is_paginated=True, current_index=new_index, total_count=len(movies), list_id=list_id
@@ -343,8 +267,73 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         print(f"[WARN] Failed to edit message media: {e}")
 
+async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    genres_by_name = context.bot_data.get('genres_by_name', {})
+    if not genres_by_name:
+        await update.message.reply_text("Жанры еще не загружены, попробуйте через минуту.")
+        return
+
+    target_genres = ["Боевик", "Комедия", "Ужасы", "Фантастика", "Триллер", "Драма", "Приключения", "Фэнтези"]
+    keyboard = []
+    row = [InlineKeyboardButton("Мультфильмы", callback_data="random_cartoon"), InlineKeyboardButton("Аниме", callback_data="random_anime")]
+    keyboard.append(row)
+    row = []
+    for genre_name in target_genres:
+        genre_id = genres_by_name.get(genre_name.lower())
+        if genre_id:
+            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_genre_{genre_id}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row: keyboard.append(row)
+
+    await update.message.reply_text("Выберите категорию или жанр:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def random_genre_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    random_type = data.split("_")[1]
+    
+    genres_map = context.bot_data.get('genres', {})
+    animation_id = next((gid for gid, name in genres_map.items() if name == "мультфильм"), "16")
+
+    params = {}
+    search_query_text = ""
+
+    if random_type == "genre":
+        genre_id = data.split("_")[2]
+        params["with_genres"] = genre_id
+        params["without_genres"] = animation_id
+        search_query_text = f"'{genres_map.get(int(genre_id))}'"
+    elif random_type == "cartoon":
+        params["with_genres"] = animation_id
+        params["without_original_language"] = "ja"
+        search_query_text = "'Мультфильм'"
+    elif random_type == "anime":
+        params["with_genres"] = animation_id
+        params["with_original_language"] = "ja"
+        search_query_text = "'Аниме'"
+    
+    # Редактируем сообщение, чтобы пользователь видел, что что-то происходит
+    await query.edit_message_text(f"🔍 Подбираю случайный фильм в категории {search_query_text}...")
+    try:
+        random_movie = await asyncio.to_thread(_get_random_movie_blocking, **params)
+        if not random_movie:
+            await query.edit_message_text("🤷‍♂️ К сожалению, не удалось найти подходящий фильм. Попробуйте другой раз.")
+            return
+
+        enriched_movie = await _enrich_movie_data(random_movie)
+        text, poster, markup = await format_movie_message(enriched_movie, genres_map, "🎲 Случайный фильм:", reroll_data=data)
+        
+        await query.delete_message()
+        await context.bot.send_photo(query.message.chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+    except Exception as e:
+        print(f"[ERROR] random_genre_handler failed: {e}")
+        await query.edit_message_text("Произошла ошибка при поиске фильма.")
+
 async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
-    # ... (без изменений)
     print(f"[{datetime.now().isoformat()}] Running daily check job")
     chat_ids = context.bot_data.get("chat_ids", set())
     if not chat_ids: return
@@ -360,7 +349,6 @@ async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(1)
     except Exception as e:
         print(f"[ERROR] Daily job failed: {e}")
-
 
 # --- СБОРКА И ЗАПУСК ---
 def main():
