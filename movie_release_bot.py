@@ -90,7 +90,6 @@ def _parse_trailer(videos_data: dict) -> str | None:
 # --- ФОРМАТИРОВАНИЕ И ПАГИНАЦИЯ ---
 
 async def format_movie_for_pagination(movie_data: dict, genres_map: dict, current_index: int, total_count: int, list_id: str):
-    """Готовит все компоненты (текст, постер, кнопки) для одного фильма из уже собранных данных."""
     title = movie_data.get("title", "No Title")
     overview = movie_data.get("overview", "Описание отсутствует.")
     poster_url = movie_data.get("poster_url")
@@ -122,18 +121,15 @@ async def format_movie_for_pagination(movie_data: dict, genres_map: dict, curren
 # --- КОМАНДЫ И ОБРАБОТЧИКИ ---
 
 async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начинает сессию пагинации, предварительно загружая все данные."""
     chat_id = update.effective_chat.id
     await update.message.reply_text("🔍 Ищу и обрабатываю сегодняшние премьеры... Это может занять несколько секунд.")
     
     try:
-        # Шаг 1: Получаем базовый список фильмов
         base_movies = await asyncio.to_thread(_get_todays_movie_premieres_blocking)
         if not base_movies:
             await context.bot.send_message(chat_id, text="🎬 Значимых премьер на сегодня не найдено.")
             return
 
-        # Шаг 2: Предварительно загружаем все детали, чтобы избежать rate limit
         enriched_movies = []
         for movie in base_movies:
             details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
@@ -147,13 +143,11 @@ async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
             }
             enriched_movies.append(enriched_movie_data)
-            await asyncio.sleep(0.2) # Небольшая задержка между запросами
-
-        # Шаг 3: Сохраняем полный список в кэш
+            await asyncio.sleep(0.4) # <-- ИЗМЕНЕНИЕ: Увеличена задержка для стабильности
+        
         list_id = str(uuid.uuid4())
         context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
         
-        # Шаг 4: Отправляем первый фильм
         text, poster, markup = await format_movie_for_pagination(
             movie_data=enriched_movies[0],
             genres_map=context.bot_data.get('genres', {}),
@@ -168,7 +162,6 @@ async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, text=f"Произошла ошибка при получении данных.")
 
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки 'Назад' и 'Вперед'."""
     query = update.callback_query
     await query.answer()
 
@@ -195,7 +188,6 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_media(media=media, reply_markup=markup)
     except Exception as e:
         print(f"[WARN] Failed to edit message media: {e}")
-
 
 # --- СБОРКА И ЗАПУСК ---
 def main():
