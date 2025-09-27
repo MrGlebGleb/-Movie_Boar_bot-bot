@@ -69,20 +69,6 @@ def _parse_trailer(videos_data: dict) -> str | None:
             return f"https://www.youtube.com/watch?v={video['key']}"
     return None
 
-def _is_digitally_available(watch_providers_data: dict) -> bool:
-    """
-    Проверяет, доступен ли фильм в цифровом формате (по подписке или для покупки)
-    в России (RU) или США (US) как запасной вариант.
-    """
-    results_ru = watch_providers_data.get("results", {}).get("RU")
-    results_us = watch_providers_data.get("results", {}).get("US")
-    
-    if results_ru and (results_ru.get("flatrate") or results_ru.get("buy")):
-        return True
-    if results_us and (results_us.get("flatrate") or results_us.get("buy")):
-        return True
-    return False
-
 def _get_watch_status_string(watch_providers_data: dict) -> str:
     """
     Генерирует строку статуса просмотра для цифровых релизов,
@@ -114,58 +100,64 @@ def _get_watch_status_string(watch_providers_data: dict) -> str:
 
 async def _get_todays_top_digital_releases_blocking(limit=5):
     """
-    Получает топ-N самых значимых цифровых релизов, выходящих сегодня.
-    Фильтрует только те, которые доступны в цифре.
+    Получает топ-N самых значимых фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня.
+    Ищет по дате цифрового релиза, а не театральной премьеры.
     """
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {
         "api_key": TMDB_API_KEY,
-        "language": "en-US", # Используем en-US для обнаружения, затем переводим детали
+        "language": "en-US",
         "sort_by": "popularity.desc",
         "include_adult": "false",
-        "primary_release_date.gte": today_str,
-        "primary_release_date.lte": today_str,
-        "vote_count.gte": 10 # Учитываем только фильмы с минимум 10 голосами
+        "release_date.gte": today_str,
+        "release_date.lte": today_str,
+        "with_release_type": 4, # 4 = Digital Release
+        "region": 'RU',
+        "vote_count.gte": 10
     }
     
-    # Сначала получаем более широкий список сегодняшних релизов
     try:
         r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
         potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
     except requests.exceptions.RequestException as e:
-        print(f"[ERROR] TMDb discover API failed: {e}")
+        print(f"[ERROR] TMDb discover API for digital releases failed: {e}")
         return []
 
-    digital_releases = []
-    
-    # Обогащаем каждый фильм данными о провайдерах просмотра и фильтруем
-    movie_details_tasks = []
-    for movie in potential_releases:
-        # Добавляем небольшую задержку, чтобы избежать слишком быстрого запроса деталей
-        await asyncio.sleep(0.1) 
-        movie_details_tasks.append(asyncio.to_thread(_get_movie_details_blocking, movie['id']))
-    
-    # Выполняем запросы деталей параллельно
-    all_details = await asyncio.gather(*movie_details_tasks)
+    if not potential_releases:
+        print("[INFO] No digital releases found for RU, trying US region as a fallback.")
+        params['region'] = 'US'
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] TMDb discover API fallback for US region failed: {e}")
+            return []
 
-    for i, movie in enumerate(potential_releases):
-        details = all_details[i]
-        if _is_digitally_available(details.get("watch/providers", {})):
-            # Объединяем детали фильма из discover и конкретного эндпоинта фильма
-            enriched_movie = {
-                **movie,
-                "overview": details.get("overview", movie.get("overview")), # Берем подробное описание
-                "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
-                "trailer_url": _parse_trailer(details.get("videos", {})),
-                "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
-            }
-            digital_releases.append(enriched_movie)
+    top_releases = potential_releases[:limit]
+    if not top_releases:
+        return []
+        
+    enriched_releases = []
     
-    # Снова сортируем по популярности (на всякий случай) и возвращаем топ N
-    digital_releases.sort(key=lambda x: x.get("popularity", 0), reverse=True)
-    return digital_releases[:limit]
+    # Обогащаем топ-N фильмов полной информацией (трейлер, провайдеры)
+    details_tasks = [asyncio.to_thread(_get_movie_details_blocking, movie['id']) for movie in top_releases]
+    all_details = await asyncio.gather(*details_tasks)
+
+    for i, movie in enumerate(top_releases):
+        details = all_details[i]
+        enriched_movie = {
+            **movie,
+            "overview": details.get("overview", movie.get("overview")),
+            "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
+            "trailer_url": _parse_trailer(details.get("videos", {})),
+            "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
+        }
+        enriched_releases.append(enriched_movie)
+    
+    return enriched_releases
 
 
 def _get_historical_premieres_blocking(year: int, month_day: str, limit=3):
@@ -375,7 +367,7 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     release_year_str = release_date_str[:4] if len(release_date_str) >= 4 else '????'
 
     # Определяем префикс заголовка
-    if release_date_str == datetime.now(timezone.utc).strftime('%Y-%m-%d') and movies[new_index].get('watch_status') and "Онлайн" in movies[new_index]['watch_status']:
+    if release_date_str == datetime.now(timezone.utc).strftime('%Y-%m-%d'):
         title_prefix = "🎬 Сегодня выходит в цифре:"
     elif release_year_str.isdigit() and int(release_year_str) < datetime.now().year:
         title_prefix = f"🎞️ Релиз {release_year_str} года:"
@@ -551,3 +543,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
