@@ -19,6 +19,7 @@ from telegram.ext import (
     PicklePersistence,
     ContextTypes,
 )
+from telegram.error import BadRequest
 import translators as ts
 
 # --- Вспомогательные функции ---
@@ -85,24 +86,6 @@ def _parse_trailer(videos_data: dict) -> str | None:
             return f"https://www.youtube.com/watch?v={video['key']}"
     return None
 
-def _get_watch_status_string(watch_providers_data: dict) -> str:
-    """
-    Генерирует строку статуса просмотра для цифровых релизов,
-    перечисляя доступные сервисы.
-    """
-    results = watch_providers_data.get("results", {}).get("RU", watch_providers_data.get("results", {}).get("US"))
-    if not results: return "Статус релиза неизвестен"
-    
-    providers = []
-    if results.get("flatrate"):
-        providers.extend([p["provider_name"] for p in results["flatrate"][:2]])
-    if results.get("buy") and not providers:
-        providers.extend([p["provider_name"] for p in results["buy"][:2]])
-
-    if providers:
-        return f"📺 Онлайн: {', '.join(sorted(list(set(providers))))}"
-    return "Статус релиза неизвестен"
-
 async def _enrich_item_data(item: dict, item_type: str) -> dict:
     """Обогащает данные фильма/сериала деталями и переводом."""
     details = await asyncio.to_thread(_get_item_details_blocking, item['id'], item_type)
@@ -113,7 +96,6 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         **item,
         "item_type": item_type,
         "overview": overview_ru,
-        "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
         "trailer_url": _parse_trailer(details.get("videos", {})),
         "poster_url": f"https://image.tmdb.org/t/p/w780{item['poster_path']}"
     }
@@ -199,7 +181,6 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
         params = {
             "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
             "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str
-            # Убираем 'vote_count.gte' для будущих премьер, так как у них еще нет голосов
         }
         
         r = requests.get(url, params=params, timeout=20)
@@ -223,12 +204,10 @@ async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYP
     genres_map = context.bot_data.get('movie_genres', {}) if item_data.get('item_type') == 'movie' else context.bot_data.get('tv_genres', {})
     genre_names = [genres_map.get(gid, "") for gid in genre_ids[:2]]
     genres_str = ", ".join(filter(None, genre_names))
-    watch_status = item_data.get("watch_status")
     trailer_url = item_data.get("trailer_url")
     
     text = f"{title_prefix} *{title}*\n\n"
     if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"
-    if watch_status: text += f"Статус: {watch_status}\n"
     if genres_str: text += f"Жанр: {genres_str}\n"
     text += f"\n{overview}"
     
@@ -452,13 +431,20 @@ async def random_series_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Жанры сериалов еще не загружены, попробуйте через минуту.")
         return
 
-    target_genres = ["Боевик и Приключения", "Комедия", "Драма", "Sci-Fi & Fantasy", "Детектив", "Криминал", "Для детей", "Документальный"]
+    target_genres = [
+        "Боевик и Приключения", "Комедия", "Драма", 
+        "Детектив", "Мистика", "Криминал", 
+        "Фантастика и фэнтези", "Семейный", "Детский",
+        "Мультфильм", "Документальный", "Реалити-шоу"
+    ]
     keyboard = []
     row = []
     for genre_name in target_genres:
-        genre_id = genres_by_name.get(genre_name.lower())
+        # 'Фантастика и фэнтези' is special, need to match it correctly
+        genre_key = "sci-fi & fantasy" if genre_name == "Фантастика и фэнтези" else genre_name.lower()
+        genre_id = genres_by_name.get(genre_key)
+        
         if genre_id:
-            # ИСПРАВЛЕНИЕ: Используем 'tv' вместо 'series' для корректной работы API
             row.append(InlineKeyboardButton(genre_name, callback_data=f"random_tv_genre_{genre_id}"))
             if len(row) == 2:
                 keyboard.append(row)
@@ -474,6 +460,9 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
 
     params = {}
     search_query_text = ""
+    
+    # Use proper item_type 'tv' for API calls
+    api_item_type = "tv" if item_type == "tv" else "movie"
 
     if item_type == "movie":
         genres_map = context.bot_data.get('movie_genres', {})
@@ -491,15 +480,21 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
             params = {"with_genres": animation_id, "with_keywords": anime_keyword_id}
             search_query_text = "'Аниме'"
     
-    elif item_type == "series":
+    elif item_type == "tv":
         genres_map = context.bot_data.get('tv_genres', {})
         if selection_type == "genre":
             genre_id = rest[0]
             params = {"with_genres": genre_id}
             search_query_text = f"'{genres_map.get(int(genre_id))}'"
 
-    await query.edit_message_text(f"🔍 Подбираю случайный {'фильм' if item_type == 'movie' else 'сериал'} в категории {search_query_text}...")
     try:
+        # FIX: Handle reroll correctly by editing caption, not text
+        try:
+            await query.edit_message_text(f"🔍 Подбираю случайный {'фильм' if item_type == 'movie' else 'сериал'} в категории {search_query_text}...")
+        except BadRequest:
+            # This happens on reroll, message has a photo, so we edit the caption
+            await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...")
+
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"
         url = f"https://api.themoviedb.org/3/{endpoint}"
         
@@ -514,7 +509,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         total_pages = min(api_data.get("total_pages", 1), 500)
         
         if total_pages == 0:
-            await query.edit_message_text("🤷‍♂️ К сожалению, не удалось найти ничего подходящего. Попробуйте другой жанр.")
+            await query.message.edit_caption(caption="🤷‍♂️ К сожалению, не удалось найти ничего подходящего. Попробуйте другой жанр.")
             return
 
         random_page = random.randint(1, total_pages)
@@ -524,11 +519,11 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         results = [item for item in r.json().get("results", []) if item.get("poster_path")]
         
         if not results:
-            await query.edit_message_text("🤷‍♂️ Не удалось найти подходящий вариант. Попробуйте еще раз.")
+            await query.message.edit_caption(caption="🤷‍♂️ Не удалось найти подходящий вариант. Попробуйте еще раз.")
             return
             
         random_item = random.choice(results)
-        enriched_item = await _enrich_item_data(random_item, item_type)
+        enriched_item = await _enrich_item_data(random_item, api_item_type)
         
         reroll_callback_data = data.replace("random_", "reroll_")
         title_prefix = "🎲 Случайный фильм:" if item_type == 'movie' else "🎲 Случайный сериал:"
@@ -536,11 +531,14 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         text, poster, markup = await format_item_message(enriched_item, context, title_prefix, is_paginated=False, reroll_data=reroll_callback_data)
         
         media = InputMediaPhoto(media=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN)
-        await query.edit_message_media(media=media, reply_markup=markup)
+        await query.message.edit_media(media=media, reply_markup=markup)
 
     except Exception as e:
         print(f"[ERROR] find_and_send_random_item failed: {e}")
-        await query.edit_message_text("Произошла ошибка при поиске.")
+        try:
+            await query.message.edit_caption("Произошла ошибка при поиске.")
+        except Exception:
+            pass
 
 async def random_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает ПЕРВЫЙ выбор жанра для случайного фильма/сериала."""
@@ -550,13 +548,15 @@ async def random_selection_handler(update: Update, context: ContextTypes.DEFAULT
     temp_message = await context.bot.send_message(query.message.chat_id, "🔍 Подбираю...")
     
     class FakeQuery:
-        def __init__(self, msg): self.message = msg
-        async def edit_message_text(self, text): return await self.message.edit_text(text)
-        async def edit_message_media(self, media, reply_markup): return await self.message.edit_media(media=media, reply_markup=reply_markup)
+        def __init__(self, msg, data):
+            self.message = msg
+            self.data = data
+        async def edit_message_text(self, text):
+            return await self.message.edit_text(text)
+        async def edit_message_media(self, media, reply_markup):
+            return await self.message.edit_media(media=media, reply_markup=reply_markup)
 
-    fake_query = FakeQuery(temp_message)
-    fake_query.data = query.data # pass the original callback data
-    await find_and_send_random_item(fake_query, context)
+    await find_and_send_random_item(FakeQuery(temp_message, query.data), context)
 
 async def reroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обрабатывает кнопку 'Повторить'."""
@@ -641,6 +641,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
