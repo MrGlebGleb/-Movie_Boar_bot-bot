@@ -178,7 +178,7 @@ async def _get_todays_top_series_premieres_blocking(limit=5):
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
         "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str,
-        "vote_count.gte": 10, "watch_region": "RU"
+        "vote_count.gte": 10
     }
     
     r = requests.get(url, params=params, timeout=20)
@@ -199,7 +199,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
         params = {
             "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
             "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str,
-            "vote_count.gte": 10, "watch_region": "RU"
+            "vote_count.gte": 10
         }
         
         r = requests.get(url, params=params, timeout=20)
@@ -640,4 +640,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
