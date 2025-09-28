@@ -198,8 +198,8 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
         url = "https://api.themoviedb.org/3/discover/tv"
         params = {
             "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
-            "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str,
-            "vote_count.gte": 10
+            "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str
+            # Убираем 'vote_count.gte' для будущих премьер, так как у них еще нет голосов
         }
         
         r = requests.get(url, params=params, timeout=20)
@@ -458,7 +458,8 @@ async def random_series_command(update: Update, context: ContextTypes.DEFAULT_TY
     for genre_name in target_genres:
         genre_id = genres_by_name.get(genre_name.lower())
         if genre_id:
-            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_series_genre_{genre_id}"))
+            # ИСПРАВЛЕНИЕ: Используем 'tv' вместо 'series' для корректной работы API
+            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_tv_genre_{genre_id}"))
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
@@ -640,5 +641,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
