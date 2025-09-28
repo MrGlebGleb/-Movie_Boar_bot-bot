@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Movie release Telegram bot with all features including pagination and an advanced random movie feature.
+Movie and TV show release Telegram bot with all features including pagination and an advanced random movie feature.
 Now focused on digital releases and unified message format.
 """
 
@@ -32,18 +32,33 @@ def translate_text_blocking(text: str, to_lang='ru') -> str:
 async def on_startup(context: ContextTypes.DEFAULT_TYPE):
     """Кэширует список жанров при старте бота."""
     print("[INFO] Caching movie genres...")
-    url = "https://api.themoviedb.org/3/genre/movie/list"
-    params = {"api_key": TMDB_API_KEY, "language": "ru-RU"}
+    # Movie genres
     try:
+        url = "https://api.themoviedb.org/3/genre/movie/list"
+        params = {"api_key": TMDB_API_KEY, "language": "ru-RU"}
         r = requests.get(url, params=params, timeout=15)
         r.raise_for_status()
-        genres = {g['id']: g['name'] for g in r.json()['genres']}
-        context.bot_data['genres'] = genres
-        context.bot_data['genres_by_name'] = {v.lower(): k for k, v in genres.items()}
-        print(f"[INFO] Successfully cached {len(genres)} genres.")
+        movie_genres = {g['id']: g['name'] for g in r.json()['genres']}
+        context.bot_data['movie_genres'] = movie_genres
+        context.bot_data['movie_genres_by_name'] = {v.lower(): k for k, v in movie_genres.items()}
+        print(f"[INFO] Successfully cached {len(movie_genres)} movie genres.")
     except Exception as e:
-        print(f"[ERROR] Could not cache genres: {e}")
-        context.bot_data['genres'], context.bot_data['genres_by_name'] = {}, {}
+        print(f"[ERROR] Could not cache movie genres: {e}")
+        context.bot_data['movie_genres'], context.bot_data['movie_genres_by_name'] = {}, {}
+    # TV genres
+    try:
+        url = "https://api.themoviedb.org/3/genre/tv/list"
+        params = {"api_key": TMDB_API_KEY, "language": "ru-RU"}
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        tv_genres = {g['id']: g['name'] for g in r.json()['genres']}
+        context.bot_data['tv_genres'] = tv_genres
+        context.bot_data['tv_genres_by_name'] = {v.lower(): k for k, v in tv_genres.items()}
+        print(f"[INFO] Successfully cached {len(tv_genres)} tv genres.")
+    except Exception as e:
+        print(f"[ERROR] Could not cache tv genres: {e}")
+        context.bot_data['tv_genres'], context.bot_data['tv_genres_by_name'] = {}, {}
+
 
 # --- CONFIG ---
 TELEGRAM_BOT_TOKEN, TMDB_API_KEY = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TMDB_API_KEY")
@@ -52,11 +67,12 @@ if not TELEGRAM_BOT_TOKEN or not TMDB_API_KEY:
 
 # --- Функции для работы с TMDb ---
 
-def _get_movie_details_blocking(movie_id: int):
+def _get_item_details_blocking(item_id: int, item_type: str):
     """
-    Получает подробную информацию о фильме, включая трейлеры и провайдеров просмотра.
+    Получает подробную информацию о фильме или сериале.
+    item_type: 'movie' or 'tv'
     """
-    url = f"https://api.themoviedb.org/3/movie/{movie_id}"
+    url = f"https://api.themoviedb.org/3/{item_type}/{item_id}"
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
@@ -74,223 +90,141 @@ def _get_watch_status_string(watch_providers_data: dict) -> str:
     Генерирует строку статуса просмотра для цифровых релизов,
     перечисляя доступные сервисы.
     """
-    results_ru = watch_providers_data.get("results", {}).get("RU")
-    results_us = watch_providers_data.get("results", {}).get("US")
-
-    providers = []
-    # Приоритизируем RU
-    if results_ru:
-        if results_ru.get("flatrate"):
-            providers.extend([p["provider_name"] for p in results_ru["flatrate"][:2]])
-        if results_ru.get("buy") and not providers: # Только покупка, если нет подписки
-            providers.extend([p["provider_name"] for p in results_ru["buy"][:2]])
+    results = watch_providers_data.get("results", {}).get("RU", watch_providers_data.get("results", {}).get("US"))
+    if not results: return "Статус релиза неизвестен"
     
-    # Запасной вариант - US, если нет RU провайдеров
-    if not providers and results_us:
-        if results_us.get("flatrate"):
-            providers.extend([p["provider_name"] for p in results_us["flatrate"][:2]])
-        if results_us.get("buy") and not providers:
-            providers.extend([p["provider_name"] for p in results_us["buy"][:2]])
+    providers = []
+    if results.get("flatrate"):
+        providers.extend([p["provider_name"] for p in results["flatrate"][:2]])
+    if results.get("buy") and not providers:
+        providers.extend([p["provider_name"] for p in results["buy"][:2]])
 
     if providers:
-        # Используем set, чтобы избежать дублирования имен провайдеров
         return f"📺 Онлайн: {', '.join(sorted(list(set(providers))))}"
-    return "🍿 Статус цифрового релиза неизвестен"
+    return "Статус релиза неизвестен"
 
+async def _enrich_item_data(item: dict, item_type: str) -> dict:
+    """Обогащает данные фильма/сериала деталями и переводом."""
+    details = await asyncio.to_thread(_get_item_details_blocking, item['id'], item_type)
+    overview_ru = await asyncio.to_thread(translate_text_blocking, item.get("overview", ""))
+    await asyncio.sleep(0.4)
+    
+    enriched_item = {
+        **item,
+        "item_type": item_type,
+        "overview": overview_ru,
+        "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
+        "trailer_url": _parse_trailer(details.get("videos", {})),
+        "poster_url": f"https://image.tmdb.org/t/p/w780{item['poster_path']}"
+    }
+    return enriched_item
+
+# --- Функции для фильмов ---
 
 async def _get_todays_top_digital_releases_blocking(limit=5):
-    """
-    Получает топ-N самых значимых фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня.
-    Ищет по дате цифрового релиза, а не театральной премьеры.
-    """
+    """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     url = "https://api.themoviedb.org/3/discover/movie"
     params = {
-        "api_key": TMDB_API_KEY,
-        "language": "en-US",
-        "sort_by": "popularity.desc",
-        "include_adult": "false",
-        "release_date.gte": today_str,
-        "release_date.lte": today_str,
-        "with_release_type": 4, # 4 = Digital Release
-        "region": 'RU',
-        "vote_count.gte": 10
+        "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
+        "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str,
+        "with_release_type": 4, "region": 'RU', "vote_count.gte": 10
     }
     
-    try:
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
+    if not releases:
+        params['region'] = 'US'
         r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
-        potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] TMDb discover API for digital releases failed: {e}")
-        return []
-
-    if not potential_releases:
-        print("[INFO] No digital releases found for RU, trying US region as a fallback.")
-        params['region'] = 'US'
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            r.raise_for_status()
-            potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
-        except requests.exceptions.RequestException as e:
-            print(f"[ERROR] TMDb discover API fallback for US region failed: {e}")
-            return []
-
-    top_releases = potential_releases[:limit]
-    if not top_releases:
-        return []
-        
-    enriched_releases = []
+        releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
     
-    # Обогащаем топ-N фильмов полной информацией (трейлер, провайдеры)
-    details_tasks = [asyncio.to_thread(_get_movie_details_blocking, movie['id']) for movie in top_releases]
-    all_details = await asyncio.gather(*details_tasks)
-
-    for i, movie in enumerate(top_releases):
-        details = all_details[i]
-        enriched_movie = {
-            **movie,
-            "overview": details.get("overview", movie.get("overview")),
-            "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
-            "trailer_url": _parse_trailer(details.get("videos", {})),
-            "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
-        }
-        enriched_releases.append(enriched_movie)
-    
-    return enriched_releases
+    return [await _enrich_item_data(m, 'movie') for m in releases[:limit]]
 
 
 async def _get_next_digital_releases_blocking(limit=5, search_days=90):
-    """
-    Находит ближайший день с цифровыми релизами и возвращает топ-N релизов за этот день.
-    """
+    """Находит ближайший день с цифровыми релизами фильмов."""
     start_date = datetime.now(timezone.utc) + timedelta(days=1)
-    
     for i in range(search_days):
         target_date = start_date + timedelta(days=i)
         target_date_str = target_date.strftime('%Y-%m-%d')
         
         url = "https://api.themoviedb.org/3/discover/movie"
         params = {
-            "api_key": TMDB_API_KEY,
-            "language": "en-US",
-            "sort_by": "popularity.desc",
-            "include_adult": "false",
-            "release_date.gte": target_date_str,
-            "release_date.lte": target_date_str,
-            "with_release_type": 4, # Digital Release
-            "region": 'RU',
-            "vote_count.gte": 10
+            "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
+            "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str,
+            "with_release_type": 4, "region": 'RU', "vote_count.gte": 10
         }
         
-        # Сначала ищем в регионе RU
-        try:
-            r = requests.get(url, params=params, timeout=20)
-            r.raise_for_status()
-            potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
-        except requests.exceptions.RequestException:
-            potential_releases = []
-
-        # Если в RU пусто, ищем в US
-        if not potential_releases:
+        r = requests.get(url, params=params, timeout=20)
+        releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
+        if not releases:
             params['region'] = 'US'
-            try:
-                r = requests.get(url, params=params, timeout=20)
-                r.raise_for_status()
-                potential_releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
-            except requests.exceptions.RequestException:
-                potential_releases = []
+            r = requests.get(url, params=params, timeout=20)
+            releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
         
-        # Если нашли релизы за этот день, обрабатываем и возвращаем их
-        if potential_releases:
-            print(f"[INFO] Found next digital releases on {target_date_str}")
-            top_releases = potential_releases[:limit]
-            enriched_releases = []
-            
-            details_tasks = [asyncio.to_thread(_get_movie_details_blocking, movie['id']) for movie in top_releases]
-            all_details = await asyncio.gather(*details_tasks)
-
-            for idx, movie in enumerate(top_releases):
-                details = all_details[idx]
-                enriched_movie = {
-                    **movie,
-                    "overview": details.get("overview", movie.get("overview")),
-                    "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
-                    "trailer_url": _parse_trailer(details.get("videos", {})),
-                    "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
-                }
-                enriched_releases.append(enriched_movie)
-            
-            return enriched_releases, target_date
-
+        if releases:
+            enriched = [await _enrich_item_data(m, 'movie') for m in releases[:limit]]
+            return enriched, target_date
     return [], None
 
+# --- Функции для сериалов ---
 
-def _get_historical_premieres_blocking(year: int, month_day: str, limit=3):
-    """
-    Получает топ-N исторических премьер за определенную дату в указанном году.
-    Используется для команды /year.
-    """
-    target_date = f"{year}-{month_day}"
-    url = "https://api.themoviedb.org/3/discover/movie"
-    params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": target_date, "primary_release_date.lte": target_date}
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    return [m for m in r.json().get("results", []) if m.get("poster_path")][:limit]
-
-def _get_random_movie_blocking(with_genres: str = None, without_genres: str = None, with_keywords: str = None, without_keywords: str = None):
-    """Более гибкая функция для поиска случайного фильма."""
-    discover_url = "https://api.themoviedb.org/3/discover/movie"
+async def _get_todays_top_series_premieres_blocking(limit=5):
+    """Получает топ-N сериалов, чья премьера состоялась сегодня."""
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    url = "https://api.themoviedb.org/3/discover/tv"
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
-        "include_adult": "false", "vote_average.gte": 7.0, "vote_count.gte": 100,
-        "primary_release_date.gte": "1985-01-01", "primary_release_date.lte": "2025-12-31",
-        "page": 1
+        "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str,
+        "vote_count.gte": 10, "watch_region": "RU"
     }
-    if with_genres: params["with_genres"] = with_genres
-    if without_genres: params["without_genres"] = without_genres
-    if with_keywords: params["with_keywords"] = with_keywords
-    if without_keywords: params["without_keywords"] = without_keywords
-
-    r = requests.get(discover_url, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    total_pages = data.get("total_pages", 1)
-    if total_pages == 0: return None
     
-    random_page = random.randint(1, min(total_pages, 500))
-    params["page"] = random_page
-    r = requests.get(discover_url, params=params, timeout=20)
+    r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
-    results = [m for m in r.json().get("results", []) if m.get("poster_path")]
-    return random.choice(results) if results else None
+    releases = [s for s in r.json().get("results", []) if s.get("poster_path")]
+    
+    return [await _enrich_item_data(s, 'tv') for s in releases[:limit]]
 
 
-async def _enrich_movie_data(movie: dict) -> dict:
-    """
-    Обогащает данные фильма, переводя описание, добавляя статус просмотра,
-    URL трейлера и URL постера.
-    Используется для /year и /random команд.
-    """
-    details = await asyncio.to_thread(_get_movie_details_blocking, movie['id'])
-    overview_ru = await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
-    await asyncio.sleep(0.4) # Задержка для обхода лимитов переводчика
-    return {
-        **movie,
-        "overview": overview_ru,
-        "watch_status": _get_watch_status_string(details.get("watch/providers", {})),
-        "trailer_url": _parse_trailer(details.get("videos", {})),
-        "poster_url": f"https://image.tmdb.org/t/p/w780{movie['poster_path']}"
-    }
+async def _get_next_series_premieres_blocking(limit=5, search_days=90):
+    """Находит ближайший день с премьерами сериалов."""
+    start_date = datetime.now(timezone.utc) + timedelta(days=1)
+    for i in range(search_days):
+        target_date = start_date + timedelta(days=i)
+        target_date_str = target_date.strftime('%Y-%m-%d')
+        
+        url = "https://api.themoviedb.org/3/discover/tv"
+        params = {
+            "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
+            "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str,
+            "vote_count.gte": 10, "watch_region": "RU"
+        }
+        
+        r = requests.get(url, params=params, timeout=20)
+        releases = [s for s in r.json().get("results", []) if s.get("poster_path")]
+        
+        if releases:
+            enriched = [await _enrich_item_data(s, 'tv') for s in releases[:limit]]
+            return enriched, target_date
+    return [], None
 
-# --- ФОРМАТИРОВАНИЕ И ПАГИНАЦИЯ ---
+# --- Общие функции ---
 
-async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):
-    """Форматирует данные фильма в сообщение Telegram с поддержкой пагинации."""
-    title, overview, poster_url = movie_data.get("title"), movie_data.get("overview"), movie_data.get("poster_url")
-    rating, genre_ids = movie_data.get("vote_average", 0), movie_data.get("genre_ids", [])
+async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYPE, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):
+    """Форматирует данные фильма или сериала в сообщение Telegram."""
+    title = item_data.get("title") or item_data.get("name")
+    overview = item_data.get("overview")
+    poster_url = item_data.get("poster_url")
+    rating = item_data.get("vote_average", 0)
+    genre_ids = item_data.get("genre_ids", [])
+    
+    genres_map = context.bot_data.get('movie_genres', {}) if item_data.get('item_type') == 'movie' else context.bot_data.get('tv_genres', {})
     genre_names = [genres_map.get(gid, "") for gid in genre_ids[:2]]
-    genres_str, watch_status, trailer_url = ", ".join(filter(None, genre_names)), movie_data.get("watch_status"), movie_data.get("trailer_url")
+    genres_str = ", ".join(filter(None, genre_names))
+    watch_status = item_data.get("watch_status")
+    trailer_url = item_data.get("trailer_url")
     
     text = f"{title_prefix} *{title}*\n\n"
     if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"
@@ -299,11 +233,12 @@ async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix:
     text += f"\n{overview}"
     
     keyboard = []
-    if is_paginated:
-        nav_buttons = []
-        if current_index > 0: nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}"))
-        nav_buttons.append(InlineKeyboardButton(f"[{current_index + 1}/{total_count}]", callback_data="noop"))
-        if current_index < total_count - 1: nav_buttons.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}"))
+    if is_paginated and total_count > 1:
+        nav_buttons = [
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{list_id}_{current_index - 1}") if current_index > 0 else InlineKeyboardButton(" ", callback_data="noop"),
+            InlineKeyboardButton(f"[{current_index + 1}/{total_count}]", callback_data="noop"),
+            InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}") if current_index < total_count - 1 else InlineKeyboardButton(" ", callback_data="noop")
+        ]
         keyboard.append(nav_buttons)
     
     action_buttons = []
@@ -313,44 +248,33 @@ async def format_movie_message(movie_data: dict, genres_map: dict, title_prefix:
     
     return text, poster_url, InlineKeyboardMarkup(keyboard) if keyboard else None
 
+
 # --- КОМАНДЫ И ОБРАБОТЧИКИ ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /start, подписывает чат на рассылку и выводит помощь."""
     chat_id = update.effective_chat.id
-    chat_ids = context.bot_data.setdefault("chat_ids", set())
-    msg = (
-        "✅ Бот готов к работе!\n\n"
-        "Я буду ежедневно в 14:00 по МСК присылать сюда анонсы *цифровых релизов*.\n\n"
-        "**Доступные команды:**\n"
-        "• `/releases` — показать *цифровые релизы* на сегодня.\n"
-        "• `/next` — показать ближайшие цифровые релизы.\n"
-        "• `/random` — выбрать случайный фильм по жанру.\n"
-        "• `/year <год>` — показать топ-3 фильма, вышедших в этот день в прошлом (например: `/year 1999`).\n"
-        "• `/help` — показать это сообщение.\n"
-        "• `/stop` — отписаться от рассылки."
-    )
-    if chat_id not in chat_ids:
-        chat_ids.add(chat_id)
-        await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text("Этот чат уже есть в списке. " + msg, parse_mode=constants.ParseMode.MARKDOWN)
+    context.bot_data.setdefault("chat_ids", set()).add(chat_id)
+    await help_command(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /help и выводит список команд."""
-    await update.message.reply_text(
-        "**Список команд:**\n\n"
-        "• `/releases` — показать *цифровые релизы* на сегодня.\n"
-        "• `/next` — показать ближайшие цифровые релизы.\n"
-        "• `/random` — выбрать случайный фильм по жанру.\n"
-        "• `/year <год>` — показать топ-3 фильма, вышедших в этот день в прошлом.\n"
-        "• `/start` — подписаться на рассылку.\n"
-        "• `/stop` — отписаться от рассылки.",
-        parse_mode=constants.ParseMode.MARKDOWN
+    msg = (
+        "**Доступные команды:**\n\n"
+        "🎬 **Фильмы**\n"
+        "• `/releases_movie` — цифровые релизы фильмов сегодня.\n"
+        "• `/next_movie` — ближайшие цифровые релизы фильмов.\n"
+        "• `/random_movie` — случайный фильм по жанру.\n\n"
+        "📺 **Сериалы**\n"
+        "• `/releases_series` — премьеры новых сериалов сегодня.\n"
+        "• `/next_series` — ближайшие премьеры сериалов.\n"
+        "• `/random_series` — случайный сериал по жанру.\n\n"
+        "🎲 **Прочее**\n"
+        "• `/year <год>` — что выходило в этот день раньше.\n"
+        "• `/stop` — отписаться от ежедневной рассылки.\n"
+        "• `/help` — показать это сообщение."
     )
+    await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /stop и отписывает чат от рассылки."""
     chat_id = update.effective_chat.id
     if chat_id in context.bot_data.setdefault("chat_ids", set()):
         context.bot_data["chat_ids"].remove(chat_id)
@@ -358,81 +282,74 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Этот чат и так не был подписан.")
 
-async def premieres_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает команду /releases, показывая топ-5 сегодняшних цифровых релизов.
-    """
-    await update.message.reply_text("🔍 Ищу и обрабатываю сегодняшние *цифровые релизы*...")
+async def releases_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Ищу *цифровые релизы фильмов* на сегодня...")
     try:
-        base_movies = await _get_todays_top_digital_releases_blocking(limit=5)
-        if not base_movies:
-            await update.message.reply_text("🎬 Значимых *цифровых релизов* на сегодня не найдено.")
+        items = await _get_todays_top_digital_releases_blocking(limit=5)
+        if not items:
+            await update.message.reply_text("🎬 Значимых цифровых релизов фильмов на сегодня не найдено.")
             return
         
-        # Переводим описания для каждого фильма
-        enriched_movies = []
-        for movie in base_movies:
-            movie_with_translated_overview = {
-                **movie,
-                "overview": await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
-            }
-            enriched_movies.append(movie_with_translated_overview)
-            await asyncio.sleep(0.4) # Задержка для обхода лимитов переводчика
-
         list_id = str(uuid.uuid4())
-        context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
-        text, poster, markup = await format_movie_message(enriched_movies[0], context.bot_data.get('genres', {}), "🎬 Сегодня выходит в цифре:", is_paginated=True, current_index=0, total_count=len(enriched_movies), list_id=list_id)
+        context.bot_data.setdefault('item_lists', {})[list_id] = items
+        text, poster, markup = await format_item_message(items[0], context, "🎬 Сегодня в цифре (фильм):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
         await update.message.reply_photo(photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
     except Exception as e:
-        print(f"[ERROR] premieres_command failed: {e}")
-        await update.message.reply_text("Произошла ошибка при получении данных о цифровых релизах.")
+        print(f"[ERROR] releases_movie_command failed: {e}")
+        await update.message.reply_text("Произошла ошибка при получении данных.")
 
-async def next_releases_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает команду /next, показывая ближайшие будущие цифровые релизы.
-    """
-    await update.message.reply_text("🔍 Ищу ближайшие *цифровые релизы*...")
+async def releases_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Ищу *премьеры сериалов* на сегодня...")
     try:
-        base_movies, release_date = await _get_next_digital_releases_blocking(limit=5)
-        
-        if not base_movies or not release_date:
-            await update.message.reply_text("🎬 Не удалось найти цифровые релизы в ближайшие 3 месяца.")
+        items = await _get_todays_top_series_premieres_blocking(limit=5)
+        if not items:
+            await update.message.reply_text("📺 Значимых премьер сериалов на сегодня не найдено.")
             return
         
-        enriched_movies = []
-        for movie in base_movies:
-            movie_with_translated_overview = {
-                **movie,
-                "overview": await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
-            }
-            enriched_movies.append(movie_with_translated_overview)
-            await asyncio.sleep(0.4)
-
         list_id = str(uuid.uuid4())
-        context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
-        
-        release_date_formatted = release_date.strftime('%d.%m.%Y')
-        title_prefix = f"🎬 Ближайший релиз ({release_date_formatted}):"
-
-        text, poster, markup = await format_movie_message(
-            enriched_movies[0], 
-            context.bot_data.get('genres', {}), 
-            title_prefix, 
-            is_paginated=True, 
-            current_index=0, 
-            total_count=len(enriched_movies), 
-            list_id=list_id
-        )
+        context.bot_data.setdefault('item_lists', {})[list_id] = items
+        text, poster, markup = await format_item_message(items[0], context, "📺 Сегодня премьера (сериал):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
         await update.message.reply_photo(photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
     except Exception as e:
-        print(f"[ERROR] next_releases_command failed: {e}")
-        await update.message.reply_text("Произошла ошибка при поиске ближайших релизов.")
+        print(f"[ERROR] releases_series_command failed: {e}")
+        await update.message.reply_text("Произошла ошибка при получении данных.")
 
+async def next_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Ищу ближайшие *цифровые релизы фильмов*...")
+    try:
+        items, release_date = await _get_next_digital_releases_blocking(limit=5)
+        if not items:
+            await update.message.reply_text("🎬 Не удалось найти цифровые релизы фильмов в ближайшие 3 месяца.")
+            return
+        
+        list_id = str(uuid.uuid4())
+        context.bot_data.setdefault('item_lists', {})[list_id] = items
+        date_str = release_date.strftime('%d.%m.%Y')
+        text, poster, markup = await format_item_message(items[0], context, f"🎬 Ближайший релиз фильмов ({date_str}):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
+        await update.message.reply_photo(photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+    except Exception as e:
+        print(f"[ERROR] next_movie_command failed: {e}")
+        await update.message.reply_text("Произошла ошибка при поиске.")
+        
+async def next_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Ищу ближайшие *премьеры сериалов*...")
+    try:
+        items, release_date = await _get_next_series_premieres_blocking(limit=5)
+        if not items:
+            await update.message.reply_text("📺 Не удалось найти премьеры сериалов в ближайшие 3 месяца.")
+            return
+        
+        list_id = str(uuid.uuid4())
+        context.bot_data.setdefault('item_lists', {})[list_id] = items
+        date_str = release_date.strftime('%d.%m.%Y')
+        text, poster, markup = await format_item_message(items[0], context, f"📺 Ближайшая премьера сериалов ({date_str}):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
+        await update.message.reply_photo(photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+    except Exception as e:
+        print(f"[ERROR] next_series_command failed: {e}")
+        await update.message.reply_text("Произошла ошибка при поиске.")
 
 async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает команду /year, показывая топ-3 фильма, вышедших в этот день в прошлом.
-    """
+    # This command remains movie-focused for simplicity
     if not context.args:
         await update.message.reply_text("Укажите год после команды, например: `/year 1999`", parse_mode=constants.ParseMode.MARKDOWN)
         return
@@ -442,24 +359,30 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (ValueError, IndexError):
         await update.message.reply_text("Введите корректный год (например, 1995).")
         return
-    await update.message.reply_text(f"🔍 Ищу топ-3 релиза за {year} год...")
+    await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...")
     try:
         month_day = datetime.now(timezone.utc).strftime('%m-%d')
-        base_movies = await asyncio.to_thread(_get_historical_premieres_blocking, year, month_day)
+        # Using a simplified blocking call here, as it's a less critical feature
+        url = f"https://api.themoviedb.org/3/discover/movie"
+        params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}
+        r = requests.get(url, params=params, timeout=20)
+        base_movies = [m for m in r.json().get("results", []) if m.get("poster_path")][:3]
+
         if not base_movies:
-            await update.message.reply_text(f"🤷‍♂️ Не нашел значимых премьер за эту дату в {year} году.")
+            await update.message.reply_text(f"🤷‍♂️ Не нашел значимых премьер фильмов за эту дату в {year} году.")
             return
-        enriched_movies = await asyncio.gather(*[_enrich_movie_data(movie) for movie in base_movies])
+        
+        enriched_movies = [await _enrich_item_data(m, 'movie') for m in base_movies]
+        
         list_id = str(uuid.uuid4())
-        context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
-        text, poster, markup = await format_movie_message(enriched_movies[0], context.bot_data.get('genres', {}), f"🎞️ Релиз {year} года:", is_paginated=True, current_index=0, total_count=len(enriched_movies), list_id=list_id)
+        context.bot_data.setdefault('item_lists', {})[list_id] = enriched_movies
+        text, poster, markup = await format_item_message(enriched_movies[0], context, f"🎞️ Релиз {year} года:", is_paginated=True, current_index=0, total_count=len(enriched_movies), list_id=list_id)
         await update.message.reply_photo(photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
     except Exception as e:
         print(f"[ERROR] year_command failed: {e}")
         await update.message.reply_text("Произошла ошибка при поиске по году.")
 
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия кнопок пагинации."""
     query = update.callback_query
     await query.answer()
     try:
@@ -467,156 +390,215 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         new_index = int(new_index_str)
     except (ValueError, IndexError): return
     
-    movies = context.bot_data.get('movie_lists', {}).get(list_id)
-    if not movies or not (0 <= new_index < len(movies)):
-        await query.edit_message_text("Ошибка: список устарел или недоступен. Запросите заново.")
+    items = context.bot_data.get('item_lists', {}).get(list_id)
+    if not items or not (0 <= new_index < len(items)):
+        await query.edit_message_text("Ошибка: список устарел. Запросите заново.")
         return
     
-    release_date_str = movies[new_index].get('release_date', '????')
+    item = items[new_index]
+    item_type = item.get("item_type")
     
+    date_str = item.get('release_date') or item.get('first_air_date', '????')
     try:
-        release_date_obj = datetime.strptime(release_date_str, '%Y-%m-%d').date()
-        today_date_obj = datetime.now(timezone.utc).date()
+        item_date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
     except ValueError:
-        release_date_obj = None
-        today_date_obj = datetime.now(timezone.utc).date()
+        item_date_obj = None
 
-    if release_date_obj == today_date_obj:
-        title_prefix = "🎬 Сегодня выходит в цифре:"
-    elif release_date_obj and release_date_obj > today_date_obj:
-        release_date_formatted = release_date_obj.strftime('%d.%m.%Y')
-        title_prefix = f"🎬 Ближайший релиз ({release_date_formatted}):"
-    else: # Прошлые даты для команды /year
-        year_str = release_date_str[:4]
-        title_prefix = f"🎞️ Релиз {year_str} года:"
+    title_prefix = "🎬"
+    if item_date_obj:
+        today = datetime.now(timezone.utc).date()
+        if item_type == 'movie':
+            if item_date_obj == today: title_prefix = "🎬 Сегодня в цифре (фильм):"
+            elif item_date_obj > today: title_prefix = f"🎬 Ближайший релиз фильмов ({item_date_obj.strftime('%d.%m.%Y')}):"
+            else: title_prefix = f"🎞️ Релиз {item_date_obj.year} года:"
+        elif item_type == 'tv':
+            if item_date_obj == today: title_prefix = "📺 Сегодня премьера (сериал):"
+            else: title_prefix = f"📺 Ближайшая премьера сериалов ({item_date_obj.strftime('%d.%m.%Y')}):"
 
-    text, poster, markup = await format_movie_message(
-        movies[new_index], context.bot_data.get('genres', {}), title_prefix, is_paginated=True, current_index=new_index, total_count=len(movies), list_id=list_id
-    )
+    text, poster, markup = await format_item_message(item, context, title_prefix, is_paginated=True, current_index=new_index, total_count=len(items), list_id=list_id)
     try:
         media = InputMediaPhoto(media=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN)
         await query.edit_message_media(media=media, reply_markup=markup)
     except Exception as e:
         print(f"[WARN] Failed to edit message media: {e}")
 
-async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /random, предлагая выбрать жанр для случайного фильма."""
-    genres_by_name = context.bot_data.get('genres_by_name', {})
+# --- Функции для случайного выбора ---
+
+async def random_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предлагает выбрать жанр для случайного фильма."""
+    genres_by_name = context.bot_data.get('movie_genres_by_name', {})
     if not genres_by_name:
-        await update.message.reply_text("Жанры еще не загружены, попробуйте через минуту.")
+        await update.message.reply_text("Жанры фильмов еще не загружены, попробуйте через минуту.")
         return
 
     target_genres = ["Боевик", "Комедия", "Ужасы", "Фантастика", "Триллер", "Драма", "Приключения", "Фэнтези", "Детектив", "Криминал"]
-    keyboard = []
-    row = [InlineKeyboardButton("Мультфильмы", callback_data="random_cartoon"), InlineKeyboardButton("Аниме", callback_data="random_anime")]
-    keyboard.append(row)
+    keyboard = [[InlineKeyboardButton("Мультфильмы", callback_data="random_movie_cartoon"), InlineKeyboardButton("Аниме", callback_data="random_movie_anime")]]
+    
     row = []
     for genre_name in target_genres:
         genre_id = genres_by_name.get(genre_name.lower())
         if genre_id:
-            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_genre_{genre_id}"))
+            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_movie_genre_{genre_id}"))
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
     if row: keyboard.append(row)
-    await update.message.reply_text("Выберите категорию или жанр:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Выберите категорию или жанр фильма:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def process_random_request(query: Update.callback_query, context: ContextTypes.DEFAULT_TYPE):
-    """Общая логика для поиска случайного фильма и обновления сообщения."""
+async def random_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Предлагает выбрать жанр для случайного сериала."""
+    genres_by_name = context.bot_data.get('tv_genres_by_name', {})
+    if not genres_by_name:
+        await update.message.reply_text("Жанры сериалов еще не загружены, попробуйте через минуту.")
+        return
+
+    target_genres = ["Боевик и Приключения", "Комедия", "Драма", "Sci-Fi & Fantasy", "Детектив", "Криминал", "Для детей", "Документальный"]
+    keyboard = []
+    row = []
+    for genre_name in target_genres:
+        genre_id = genres_by_name.get(genre_name.lower())
+        if genre_id:
+            row.append(InlineKeyboardButton(genre_name, callback_data=f"random_series_genre_{genre_id}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row: keyboard.append(row)
+    await update.message.reply_text("Выберите жанр сериала:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
+    """Общая логика для поиска и отправки случайного фильма или сериала."""
     data = query.data
-    random_type = data.split("_")[1]
-    
-    genres_map = context.bot_data.get('genres', {})
-    animation_id = next((gid for gid, name in genres_map.items() if name == "Мультфильм"), "16")
-    anime_keyword_id = "210024"
+    action, item_type, selection_type, *rest = data.split("_")
 
-    params, search_query_text = {}, ""
+    params = {}
+    search_query_text = ""
 
-    if random_type == "genre":
-        genre_id = data.split("_")[2]
-        params = {"with_genres": genre_id, "without_genres": animation_id}
-        search_query_text = f"'{genres_map.get(int(genre_id))}'"
-    elif random_type == "cartoon":
-        params = {"with_genres": animation_id, "without_keywords": anime_keyword_id}
-        search_query_text = "'Мультфильм'"
-    elif random_type == "anime":
-        params = {"with_genres": animation_id, "with_keywords": anime_keyword_id}
-        search_query_text = "'Аниме'"
+    if item_type == "movie":
+        genres_map = context.bot_data.get('movie_genres', {})
+        animation_id = next((gid for gid, name in genres_map.items() if name.lower() == "мультфильм"), "16")
+        anime_keyword_id = "210024" # Ключевое слово "anime"
+        
+        if selection_type == "genre":
+            genre_id = rest[0]
+            params = {"with_genres": genre_id, "without_genres": animation_id}
+            search_query_text = f"'{genres_map.get(int(genre_id))}'"
+        elif selection_type == "cartoon":
+            params = {"with_genres": animation_id, "without_keywords": anime_keyword_id}
+            search_query_text = "'Мультфильм'"
+        elif selection_type == "anime":
+            params = {"with_genres": animation_id, "with_keywords": anime_keyword_id}
+            search_query_text = "'Аниме'"
     
-    await query.edit_message_text(f"🔍 Подбираю случайный фильм в категории {search_query_text}...")
+    elif item_type == "series":
+        genres_map = context.bot_data.get('tv_genres', {})
+        if selection_type == "genre":
+            genre_id = rest[0]
+            params = {"with_genres": genre_id}
+            search_query_text = f"'{genres_map.get(int(genre_id))}'"
+
+    await query.edit_message_text(f"🔍 Подбираю случайный {'фильм' if item_type == 'movie' else 'сериал'} в категории {search_query_text}...")
     try:
-        random_movie = await asyncio.to_thread(_get_random_movie_blocking, **params)
-        if not random_movie:
-            await query.edit_message_text("🤷‍♂️ К сожалению, не удалось найти подходящий фильм. Попробуйте другой раз.")
+        endpoint = "discover/movie" if item_type == "movie" else "discover/tv"
+        url = f"https://api.themoviedb.org/3/{endpoint}"
+        
+        base_params = {
+            "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
+            "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150,
+            "page": 1, **params
+        }
+        r = requests.get(url, params=base_params, timeout=20)
+        r.raise_for_status()
+        api_data = r.json()
+        total_pages = min(api_data.get("total_pages", 1), 500)
+        
+        if total_pages == 0:
+            await query.edit_message_text("🤷‍♂️ К сожалению, не удалось найти ничего подходящего. Попробуйте другой жанр.")
             return
 
-        enriched_movie = await _enrich_movie_data(random_movie)
-        text, poster, markup = await format_movie_message(enriched_movie, genres_map, "🎲 Случайный фильм:", reroll_data=data)
+        random_page = random.randint(1, total_pages)
+        base_params["page"] = random_page
+        r = requests.get(url, params=base_params, timeout=20)
+        r.raise_for_status()
+        results = [item for item in r.json().get("results", []) if item.get("poster_path")]
+        
+        if not results:
+            await query.edit_message_text("🤷‍♂️ Не удалось найти подходящий вариант. Попробуйте еще раз.")
+            return
+            
+        random_item = random.choice(results)
+        enriched_item = await _enrich_item_data(random_item, item_type)
+        
+        reroll_callback_data = data.replace("random_", "reroll_")
+        title_prefix = "🎲 Случайный фильм:" if item_type == 'movie' else "🎲 Случайный сериал:"
+        
+        text, poster, markup = await format_item_message(enriched_item, context, title_prefix, is_paginated=False, reroll_data=reroll_callback_data)
         
         media = InputMediaPhoto(media=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN)
         await query.edit_message_media(media=media, reply_markup=markup)
-    except Exception as e:
-        print(f"[ERROR] process_random_request failed: {e}")
-        await query.edit_message_text("Произошла ошибка при поиске фильма.")
 
-async def random_genre_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает ПЕРВЫЙ выбор жанра для случайного фильма."""
+    except Exception as e:
+        print(f"[ERROR] find_and_send_random_item failed: {e}")
+        await query.edit_message_text("Произошла ошибка при поиске.")
+
+async def random_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает ПЕРВЫЙ выбор жанра для случайного фильма/сериала."""
     query = update.callback_query
     await query.answer()
     await query.delete_message()    
-    temp_message = await context.bot.send_message(query.message.chat_id, "🔍 Подбираю случайный фильм...")
+    temp_message = await context.bot.send_message(query.message.chat_id, "🔍 Подбираю...")
     
     class FakeQuery:
-        def __init__(self, msg, data):
-            self.message = msg
-            self.data = data
-        async def edit_message_text(self, text):
-            return await self.message.edit_text(text)
-        async def edit_message_media(self, media, reply_markup):
-            return await self.message.edit_media(media=media, reply_markup=reply_markup)
+        def __init__(self, msg): self.message = msg
+        async def edit_message_text(self, text): return await self.message.edit_text(text)
+        async def edit_message_media(self, media, reply_markup): return await self.message.edit_media(media=media, reply_markup=reply_markup)
 
-    await process_random_request(FakeQuery(temp_message, query.data), context)
+    fake_query = FakeQuery(temp_message)
+    fake_query.data = query.data # pass the original callback data
+    await find_and_send_random_item(fake_query, context)
 
-async def reroll_random_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает кнопку 'Повторить' для случайного фильма."""
+async def reroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает кнопку 'Повторить'."""
     query = update.callback_query
     await query.answer()
-    await process_random_request(query, context)
+    await find_and_send_random_item(query, context)
 
 
-async def daily_check_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Ежедневная задача: отправляет топ-5 цифровых релизов в 14:00 МСК
-    каждому подписанному чату одним сообщением с пагинацией.
-    """
-    print(f"[{datetime.now().isoformat()}] Running daily check job for digital releases")
+# --- Ежедневные задачи ---
+
+async def daily_movie_check_job(context: ContextTypes.DEFAULT_TYPE):
+    print(f"[{datetime.now().isoformat()}] Running daily movie check job")
     chat_ids = context.bot_data.get("chat_ids", set())
     if not chat_ids: return
     try:
-        base_movies = await _get_todays_top_digital_releases_blocking(limit=5)
-        if not base_movies:
-            for chat_id in list(chat_ids):
-                await context.bot.send_message(chat_id, "🎬 Сегодня значимых цифровых релизов не найдено.")
-            return
-
-        enriched_movies = []
-        for movie in base_movies:
-            movie_with_translated_overview = {
-                **movie,
-                "overview": await asyncio.to_thread(translate_text_blocking, movie.get("overview", ""))
-            }
-            enriched_movies.append(movie_with_translated_overview)
-            await asyncio.sleep(0.4)
-
+        items = await _get_todays_top_digital_releases_blocking(limit=5)
+        if not items: return
+        
         for chat_id in list(chat_ids):
-            print(f"Sending daily digital releases to {chat_id}")
             list_id = str(uuid.uuid4())
-            context.bot_data.setdefault('movie_lists', {})[list_id] = enriched_movies
-            text, poster, markup = await format_movie_message(enriched_movies[0], context.bot_data.get('genres', {}), "🎬 Сегодня выходит в цифре:", is_paginated=True, current_index=0, total_count=len(enriched_movies), list_id=list_id)
+            context.bot_data.setdefault('item_lists', {})[list_id] = items
+            text, poster, markup = await format_item_message(items[0], context, "🎬 Сегодня в цифре (фильм):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
             await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
             await asyncio.sleep(1)
     except Exception as e:
-        print(f"[ERROR] Daily job for digital releases failed: {e}")
+        print(f"[ERROR] Daily movie job failed: {e}")
+
+async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
+    print(f"[{datetime.now().isoformat()}] Running daily series check job")
+    chat_ids = context.bot_data.get("chat_ids", set())
+    if not chat_ids: return
+    try:
+        items = await _get_todays_top_series_premieres_blocking(limit=5)
+        if not items: return
+        
+        for chat_id in list(chat_ids):
+            list_id = str(uuid.uuid4())
+            context.bot_data.setdefault('item_lists', {})[list_id] = items
+            text, poster, markup = await format_item_message(items[0], context, "📺 Сегодня премьера (сериал):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
+            await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+            await asyncio.sleep(1)
+    except Exception as e:
+        print(f"[ERROR] Daily series job failed: {e}")
 
 # --- СБОРКА И ЗАПУСК ---
 def main():
@@ -629,24 +611,29 @@ def main():
         .build()
     )
 
+    # Command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("releases", premieres_command))
-    application.add_handler(CommandHandler("premieres", premieres_command))
-    application.add_handler(CommandHandler("next", next_releases_command))
     application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("releases_movie", releases_movie_command))
+    application.add_handler(CommandHandler("releases_series", releases_series_command))
+    application.add_handler(CommandHandler("next_movie", next_movie_command))
+    application.add_handler(CommandHandler("next_series", next_series_command))
     application.add_handler(CommandHandler("year", year_command))
-    application.add_handler(CommandHandler("random", random_command))
+    application.add_handler(CommandHandler("random_movie", random_movie_command))
+    application.add_handler(CommandHandler("random_series", random_series_command))
 
-    # Регистрируем обработчики кнопок
+
+    # Callback query handlers
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
-    application.add_handler(CallbackQueryHandler(random_genre_handler, pattern="^random_"))
-    application.add_handler(CallbackQueryHandler(reroll_random_handler, pattern="^reroll_"))
+    application.add_handler(CallbackQueryHandler(random_selection_handler, pattern="^random_"))
+    application.add_handler(CallbackQueryHandler(reroll_handler, pattern="^reroll_"))
     application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
     
+    # Job queue
     tz = ZoneInfo("Europe/Moscow")
-    scheduled_time = time(hour=14, minute=0, tzinfo=tz)
-    application.job_queue.run_daily(daily_check_job, scheduled_time, name="daily_movie_check")
+    application.job_queue.run_daily(daily_movie_check_job, time(hour=14, minute=0, tzinfo=tz), name="daily_movie_check")
+    application.job_queue.run_daily(daily_series_check_job, time(hour=14, minute=5, tzinfo=tz), name="daily_series_check")
 
     print("[INFO] Starting bot...")
     application.run_polling()
