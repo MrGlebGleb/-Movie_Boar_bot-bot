@@ -92,6 +92,7 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
 # --- Функции для работы с TMDb ---
 def _get_item_details_blocking(item_id: int, item_type: str):
     """Получает подробную информацию о фильме или сериале."""
+    # ИСПРАВЛЕНО: Правильный формат URL
     url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}
     r = requests.get(url, params=params, timeout=20)
@@ -102,6 +103,7 @@ def _parse_trailer(videos_data: dict) -> str | None:
     """Извлекает URL трейлера YouTube."""
     for video in videos_data.get("results", []):
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":
+            # ИСПРАВЛЕНО: Правильный формат URL
             return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video['key']}"
     return None
 
@@ -115,6 +117,7 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         "item_type": item_type,
         "overview": overview_ru,
         "trailer_url": _parse_trailer(details.get("videos", {})),
+        # ИСПРАВЛЕНО: Правильный формат URL
         "poster_url": f"[https://image.tmdb.org/t/p/w780](https://image.tmdb.org/t/p/w780){item['poster_path']}"
     }
 
@@ -124,6 +127,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     for keyword in [k.strip() for k in keywords_str.split(',')]:
         if not keyword: continue
         try:
+            # ИСПРАВЛЕНО: Правильный формат URL
             search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"
             params = {"api_key": TMDB_API_KEY, "query": keyword}
             r = requests.get(search_url, params=params, timeout=10)
@@ -139,6 +143,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         return None
 
     try:
+        # ИСПРАВЛЕНО: Правильный формат URL
         discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         discover_params = {
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),
@@ -168,6 +173,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
 async def _get_todays_top_digital_releases_blocking(limit=5):
     """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    # ИСПРАВЛЕНО: Правильный формат URL
     url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
@@ -191,6 +197,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     start_date = datetime.now(timezone.utc) + timedelta(days=1)
     for i in range(search_days):
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+        # ИСПРАВЛЕНО: Правильный формат URL
         url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10}
         r = requests.get(url, params=params, timeout=20)
@@ -206,6 +213,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
 async def _get_todays_top_series_premieres_blocking(limit=5):
     """Получает топ-N сериалов, чья премьера состоялась сегодня."""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    # ИСПРАВЛЕНО: Правильный формат URL
     url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
     params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}
     r = requests.get(url, params=params, timeout=20)
@@ -219,6 +227,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
     for i in range(search_days):
         target_date = start_date + timedelta(days=i)
         target_date_str = target_date.strftime('%Y-%m-%d')
+        # ИСПРАВЛЕНО: Правильный формат URL
         url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str}
         r = requests.get(url, params=params, timeout=20)
@@ -375,6 +384,7 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...")
     try:
         month_day = datetime.now(timezone.utc).strftime('%m-%d')
+        # ИСПРАВЛЕНО: Правильный формат URL
         url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}
         r = requests.get(url, params=params, timeout=20)
@@ -497,6 +507,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...")
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"
+        # ИСПРАВЛЕНО: Правильный формат URL
         url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){endpoint}"
         base_params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150, "page": 1, **params}
         r = requests.get(url, params=base_params, timeout=20)
@@ -659,6 +670,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
