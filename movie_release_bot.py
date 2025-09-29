@@ -83,8 +83,8 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:  
     """Отправляет изображение в Gemini и получает ключевые слова."""  
     try:  
-        # ИЗМЕНЕНО: Возвращаемся к стандартной модели и добавляем детальную обработку ошибок.
-        model = genai.GenerativeModel('gemini-pro-vision')  
+        # ИЗМЕНЕНО: Используем 'gemini-1.5-flash' согласно вашему запросу.
+        model = genai.GenerativeModel('gemini-1.5-flash')  
         response = model.generate_content([GEMINI_PROMPT, img])  
         keywords = response.text.strip().replace("```", "").replace("`", "")  
         return keywords  
@@ -92,10 +92,11 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
     except google_exceptions.NotFound as e:
         print(f"[CRITICAL ERROR] Gemini API request failed: 404 Not Found. {e}")
         print("-" * 50)
-        print("Это означает, что модель 'gemini-pro-vision' недоступна для вашего проекта.")
+        # ИЗМЕНЕНО: Обновлено имя модели в сообщении об ошибке
+        print("Это означает, что модель 'gemini-1.5-flash' недоступна для вашего проекта.")
         print("ПОЖАЛУЙСТА, ПРОВЕРЬТЕ В GOOGLE CLOUD CONSOLE:")
         print("1. API 'Vertex AI API' (или 'Generative Language API') включен для проекта 'projects/223392865035'.")
-        print("2. Для вашего проекта включен биллинг (оплата). Некоторые модели требуют этого.")
+        print("2. Для вашего проекта включен биллинг (оплата). Некоторые модели, включая бесплатные, могут требовать этого для защиты от злоупотреблений.")
         print("3. Убедитесь, что у вашего API ключа нет ограничений на использование конкретных API.")
         print("-" * 50)
         return None
@@ -106,7 +107,7 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
 # --- Функции для работы с TMDb ---  
 def _get_item_details_blocking(item_id: int, item_type: str):  
     """Получает подробную информацию о фильме или сериале."""  
-    url = f"https://api.themoviedb.org/3/{item_type}/{item_id}"  
+    url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"  
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -116,7 +117,7 @@ def _parse_trailer(videos_data: dict) -> str | None:
     """Извлекает URL трейлера YouTube."""  
     for video in videos_data.get("results", []):  
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":  
-            return f"https://www.youtube.com/watch?v={video['key']}"  
+            return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video['key']}"  
     return None  
 
 async def _enrich_item_data(item: dict, item_type: str) -> dict:  
@@ -136,7 +137,7 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         "item_type": item_type,  
         "overview": overview_ru,  
         "trailer_url": _parse_trailer(details.get("videos", {})),  
-        "poster_url": f"https://image.tmdb.org/t/p/w780{item['poster_path']}"  
+        "poster_url": f"[https://image.tmdb.org/t/p/w780](https://image.tmdb.org/t/p/w780){item['poster_path']}"  
     }  
 
 def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:  
@@ -145,7 +146,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     for keyword in [k.strip() for k in keywords_str.split(',')]:  
         if not keyword: continue  
         try:  
-            search_url = "https://api.themoviedb.org/3/search/keyword"  
+            search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"  
             params = {"api_key": TMDB_API_KEY, "query": keyword}  
             r = requests.get(search_url, params=params, timeout=10)  
             r.raise_for_status()  
@@ -160,7 +161,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         return None  
 
     try:  
-        discover_url = "https://api.themoviedb.org/3/discover/movie"  
+        discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         discover_params = {  
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),  
             "sort_by": "popularity.desc", "vote_average.gte": 6.0,  
@@ -189,7 +190,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
 async def _get_todays_top_digital_releases_blocking(limit=5):  
     """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    url = "https://api.themoviedb.org/3/discover/movie"  
+    url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
     params = {  
         "api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc",  
         "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str,  
@@ -212,7 +213,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     start_date = datetime.now(timezone.utc) + timedelta(days=1)  
     for i in range(search_days):  
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/movie"  
+        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [m for m in r.json().get("results", []) if m.get("poster_path")]  
@@ -228,7 +229,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
 async def _get_todays_top_series_premieres_blocking(limit=5):  
     """Получает топ-N сериалов, чья премьера состоялась сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    url = "https://api.themoviedb.org/3/discover/tv"  
+    url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"  
     params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -241,7 +242,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
     for i in range(search_days):  
         target_date = start_date + timedelta(days=i)  
         target_date_str = target_date.strftime('%Y-%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/tv"  
+        url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [s for s in r.json().get("results", []) if s.get("poster_path")]  
@@ -405,7 +406,7 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         month_day = datetime.now(timezone.utc).strftime('%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/movie"  
+        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}  
         r = requests.get(url, params=params, timeout=20)  
         base_movies = [m for m in r.json().get("results", []) if m.get("poster_path")][:3]  
@@ -536,7 +537,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:  
             await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...", parse_mode=constants.ParseMode.MARKDOWN)  
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"  
-        url = f"https://api.themoviedb.org/3/{endpoint}"  
+        url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){endpoint}"  
         base_params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150, "page": 1, **params}  
         r = requests.get(url, params=base_params, timeout=20)  
         r.raise_for_status()  
@@ -726,6 +727,7 @@ def main():
 
 if __name__ == "__main__":  
     main()
+
 
 
 
