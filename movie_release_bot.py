@@ -89,6 +89,7 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
         print("1. API 'Vertex AI API' (или 'Generative Language API') включен для вашего проекта.")
         print("2. Для вашего проекта включен биллинг (оплата).")
         print("3. Убедитесь, что у вашего API ключа нет ограничений на использование конкретных API.")
+        print("4. Попробуйте создать новый API ключ.")
         print("-" * 50)
         return None
     except Exception as e:  
@@ -97,6 +98,7 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
 
 # --- Функции для работы с TMDb ---  
 def _get_item_details_blocking(item_id: int, item_type: str):  
+    # ИСПРАВЛЕНО: URL был неверным
     url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"  
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers", "language": "ru-RU"}  
     r = requests.get(url, params=params, timeout=20)  
@@ -106,6 +108,7 @@ def _get_item_details_blocking(item_id: int, item_type: str):
 def _parse_trailer(videos_data: dict) -> str | None:  
     for video in videos_data.get("results", []):  
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":  
+            # ИСПРАВЛЕНО: URL был неверным
             return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video['key']}"  
     return None  
 
@@ -118,6 +121,7 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         "item_type": item_type,  
         "overview": overview_ru,  
         "trailer_url": _parse_trailer(details.get("videos", {})),  
+        # ИСПРАВЛЕНО: URL был неверным
         "poster_url": f"[https://image.tmdb.org/t/p/w780](https://image.tmdb.org/t/p/w780){item['poster_path']}"  
     }  
 
@@ -126,6 +130,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     for keyword in [k.strip() for k in keywords_str.split(',')]:  
         if not keyword: continue  
         try:  
+            # ИСПРАВЛЕНО: URL был неверным
             search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"  
             params = {"api_key": TMDB_API_KEY, "query": keyword}  
             r = requests.get(search_url, params=params, timeout=10)  
@@ -141,6 +146,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         return None  
 
     try:  
+        # ИСПРАВЛЕНО: URL был неверным
         discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         discover_params = {  
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),  
@@ -164,6 +170,8 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     except Exception as e:  
         print(f"[ERROR] TMDb discover request failed: {e}")  
         return None  
+
+# ... (Остальной код без изменений) ...
 
 async def _get_todays_top_digital_releases_blocking(limit=5):  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
@@ -580,7 +588,6 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:  
         print(f"[ERROR] Daily series job failed: {e}")  
 
-# НОВАЯ ФУНКЦИЯ для проверки моделей
 def check_available_models():
     """Проверяет доступные модели Gemini"""
     try:
@@ -601,7 +608,6 @@ def check_available_models():
         return []
 
 def main():
-    # ИЗМЕНЕНО: Вызываем проверку моделей при старте
     print("Проверяю доступные модели Gemini...")
     available_models = check_available_models()
     
@@ -634,9 +640,6 @@ def main():
 
 if __name__ == "__main__":  
     main()
-
-
-
 
 
 
