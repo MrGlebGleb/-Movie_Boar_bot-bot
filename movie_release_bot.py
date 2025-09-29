@@ -30,7 +30,6 @@ import translators as ts
 
 # --- Вспомогательные функции ---
 def translate_text_blocking(text: str, to_lang='ru') -> str:
-    """Переводит текст с использованием библиотеки `translators`."""
     if not text: return ""
     try: return ts.translate_text(text, translator='google', to_language=to_lang)
     except Exception as e:
@@ -109,11 +108,6 @@ def _parse_trailer(videos_data: dict) -> str | None:
 async def _enrich_item_data(item: dict, item_type: str) -> dict:
     """Обогащает данные деталями и переводом."""
     details = await asyncio.to_thread(_get_item_details_blocking, item['id'], item_type)
-    original_title = item.get("title") if item_type == 'movie' else item.get('name')
-    if original_title:
-        russian_title = await asyncio.to_thread(translate_text_blocking, original_title)
-        item['title_ru'] = russian_title
-    
     overview_ru = await asyncio.to_thread(translate_text_blocking, item.get("overview", ""))
     await asyncio.sleep(0.4)
     return {
@@ -139,7 +133,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
                 keyword_ids.append(str(results[0]["id"]))
         except Exception as e:
             print(f"[WARN] Could not find TMDb ID for keyword '{keyword}': {e}")
-            
+
     if not keyword_ids:
         print("[INFO] No valid keyword IDs found from Gemini response.")
         return None
@@ -158,7 +152,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         total_pages = data.get("total_pages", 0)
         if total_pages == 0:
             return None
-            
+
         random_page = random.randint(1, min(total_pages, 500))
         discover_params["page"] = random_page
         r = requests.get(discover_url, params=discover_params, timeout=20)
@@ -180,7 +174,7 @@ async def _get_todays_top_digital_releases_blocking(limit=5):
         "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str,
         "with_release_type": 4, "region": 'RU', "vote_count.gte": 10
     }
-    
+
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
     releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
@@ -189,7 +183,7 @@ async def _get_todays_top_digital_releases_blocking(limit=5):
         r = requests.get(url, params=params, timeout=20)
         r.raise_for_status()
         releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
-    
+
     return [await _enrich_item_data(m, 'movie') for m in releases[:limit]]
 
 async def _get_next_digital_releases_blocking(limit=5, search_days=90):
@@ -204,7 +198,6 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
         if not releases:
             params['region'] = 'US'
             r = requests.get(url, params=params, timeout=20)
-            r.raise_for_status()
             releases = [m for m in r.json().get("results", []) if m.get("poster_path")]
         if releases:
             return [await _enrich_item_data(m, 'movie') for m in releases[:limit]], start_date + timedelta(days=i)
@@ -238,7 +231,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
 
 async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYPE, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):
     """Форматирует данные фильма или сериала в сообщение Telegram."""
-    title = item_data.get("title_ru") or item_data.get("title") or item_data.get("name")
+    title = item_data.get("title") or item_data.get("name")
     overview = item_data.get("overview")
     poster_url = item_data.get("poster_url")
     rating = item_data.get("vote_average", 0)
@@ -247,12 +240,12 @@ async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYP
     genre_names = [genres_map.get(gid, "") for gid in genre_ids[:2]]
     genres_str = ", ".join(filter(None, genre_names))
     trailer_url = item_data.get("trailer_url")
-    
+
     text = f"{title_prefix} *{title}*\n\n"
     if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"
     if genres_str: text += f"Жанр: {genres_str}\n"
     text += f"\n{overview}"
-    
+
     keyboard = []
     if is_paginated and total_count > 1:
         nav_buttons = [
@@ -261,12 +254,12 @@ async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}") if current_index < total_count - 1 else InlineKeyboardButton(" ", callback_data="noop")
         ]
         keyboard.append(nav_buttons)
-    
+
     action_buttons = []
     if reroll_data: action_buttons.append(InlineKeyboardButton("🔄 Повторить", callback_data=reroll_data))
     if trailer_url: action_buttons.append(InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url))
     if action_buttons: keyboard.append(action_buttons)
-    
+
     return text, poster_url, InlineKeyboardMarkup(keyboard) if keyboard else None
 
 # --- КОМАНДЫ ---
@@ -279,7 +272,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "**Доступные команды:**\n\n"
-        "✨ **НОВИНКА!** Просто **отправьте мне фото (с упоминанием в группе)**, и я подберу фильм под его настроение!\n\n"
+        "✨ **НОВИНКА!** Просто **отправьте мне фото**, и я подберу фильм под его настроение!\n\n"
         "🎬 **Фильмы**\n"
         "• `/releases_movie` — цифровые релизы фильмов сегодня.\n"
         "• `/next_movie` — ближайшие цифровые релизы фильмов.\n"
@@ -310,7 +303,7 @@ async def releases_movie_command(update: Update, context: ContextTypes.DEFAULT_T
         if not items:
             await update.message.reply_text("🎬 Значимых цифровых релизов фильмов на сегодня не найдено.")
             return
-            
+
         list_id = str(uuid.uuid4())
         context.bot_data.setdefault('item_lists', {})[list_id] = items
         text, poster, markup = await format_item_message(items[0], context, "🎬 Сегодня в цифре (фильм):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
@@ -326,7 +319,7 @@ async def releases_series_command(update: Update, context: ContextTypes.DEFAULT_
         if not items:
             await update.message.reply_text("📺 Значимых премьер сериалов на сегодня не найдено.")
             return
-            
+
         list_id = str(uuid.uuid4())
         context.bot_data.setdefault('item_lists', {})[list_id] = items
         text, poster, markup = await format_item_message(items[0], context, "📺 Сегодня премьера (сериал):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)
@@ -342,7 +335,7 @@ async def next_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not items:
             await update.message.reply_text("🎬 Не удалось найти цифровые релизы фильмов в ближайшие 3 месяца.")
             return
-            
+
         list_id = str(uuid.uuid4())
         context.bot_data.setdefault('item_lists', {})[list_id] = items
         date_str = release_date.strftime('%d.%m.%Y')
@@ -351,7 +344,7 @@ async def next_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         print(f"[ERROR] next_movie_command failed: {e}")
         await update.message.reply_text("Произошла ошибка при поиске.")
-            
+
 async def next_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Ищу ближайшие *премьеры сериалов*...")
     try:
@@ -359,7 +352,7 @@ async def next_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not items:
             await update.message.reply_text("📺 Не удалось найти премьеры сериалов в ближайшие 3 месяца.")
             return
-            
+
         list_id = str(uuid.uuid4())
         context.bot_data.setdefault('item_lists', {})[list_id] = items
         date_str = release_date.strftime('%d.%m.%Y')
@@ -554,47 +547,35 @@ async def reroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Анализирует отправленное фото и рекомендует фильм."""
-    if update.message and update.message.photo:
-        chat_id = update.effective_chat.id
-        is_mentioned = False
-        bot_username = f"@{context.bot.username}"
+    # ИЗМЕНЕНИЕ: В группе бот реагирует только если его @упомянули в подписи к фото.
+    if update.effective_chat.type != constants.ChatType.PRIVATE:
+        if not update.message.caption or f"@{context.bot.username}" not in update.message.caption:
+            print(f"[INFO] Photo in group {update.effective_chat.id} ignored: bot not mentioned.")
+            return
 
-        # Проверяем упоминание в тексте сообщения (caption для фото)
-        if update.message.caption and bot_username in update.message.caption:
-            is_mentioned = True
-        
-        # В приватном чате всегда реагируем, в групповом - только при упоминании
-        if update.effective_chat.type == constants.ChatType.PRIVATE or is_mentioned:
-            temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ настроения...")
-            try:
-                photo_file = await update.message.photo[-1].get_file()
-                photo_bytes = await photo_file.download_as_bytearray()
-                img = Image.open(io.BytesIO(photo_bytes))
-                await temp_message.edit_text("🔮 Анализирую... Подбираю ключевые слова...")
-                keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, img)
-                
-                if not keywords_str:
-                    await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото.")
-                    return
-                
-                await temp_message.edit_text(f"🔑 Нашел атмосферу: *{keywords_str}*. Ищу подходящий фильм...", parse_mode=constants.ParseMode.MARKDOWN)
-                movie = await asyncio.to_thread(_find_movie_by_keywords_blocking, keywords_str)
-                
-                if not movie:
-                    await temp_message.edit_text("🎬 Невероятная атмосфера! Но, к сожалению, я не смог найти фильм, который бы ей соответствовал. Попробуйте другое фото.")
-                    return
-                
-                enriched_movie = await _enrich_item_data(movie, 'movie')
-                text, poster, markup = await format_item_message(enriched_movie, context, "✨ Под настроение вашего фото:")
-                await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
-                await temp_message.delete()
-            except Exception as e:
-                print(f"[ERROR] photo_handler failed: {e}")
-                await temp_message.edit_text("Произошла непредвиденная ошибка. Попробуйте еще раз.")
-        else:
-            print(f"[INFO] Photo received in group chat {chat_id} but bot not mentioned. Ignoring.")
-    else:
-        print("[INFO] Message is not a photo or message is None. Ignoring.")
+    chat_id = update.effective_chat.id
+    temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ настроения...")
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        img = Image.open(io.BytesIO(photo_bytes))
+        await temp_message.edit_text("🔮 Анализирую... Подбираю ключевые слова...")
+        keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, img)
+        if not keywords_str:
+            await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото.")
+            return
+        await temp_message.edit_text(f"🔑 Нашел атмосферу: *{keywords_str}*. Ищу подходящий фильм...")
+        movie = await asyncio.to_thread(_find_movie_by_keywords_blocking, keywords_str)
+        if not movie:
+            await temp_message.edit_text("🎬 Невероятная атмосфера! Но, к сожалению, я не смог найти фильм, который бы ей соответствовал. Попробуйте другое фото.")
+            return
+        enriched_movie = await _enrich_item_data(movie, 'movie')
+        text, poster, markup = await format_item_message(enriched_movie, context, "✨ Под настроение вашего фото:")
+        await context.bot.send_photo(chat_id, photo=poster, caption=text, parse_mode=constants.ParseMode.MARKDOWN, reply_markup=markup)
+        await temp_message.delete()
+    except Exception as e:
+        print(f"[ERROR] photo_handler failed: {e}")
+        await temp_message.edit_text("Произошла непредвиденная ошибка. Попробуйте еще раз.")
 
 # --- Ежедневные задачи ---
 
@@ -658,7 +639,7 @@ def main():
     application.add_handler(CommandHandler("year", year_command))
     application.add_handler(CommandHandler("random_movie", random_movie_command))
     application.add_handler(CommandHandler("random_series", random_series_command))
-    
+
     # Message handler for photos
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
@@ -667,7 +648,7 @@ def main():
     application.add_handler(CallbackQueryHandler(random_selection_handler, pattern="^random_"))
     application.add_handler(CallbackQueryHandler(reroll_handler, pattern="^reroll_"))
     application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))
-    
+
     # Job queue
     tz = ZoneInfo("Europe/Moscow")
     application.job_queue.run_daily(daily_movie_check_job, time(hour=14, minute=0, tzinfo=tz), name="daily_movie_check")
@@ -678,6 +659,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
