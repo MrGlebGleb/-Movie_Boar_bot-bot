@@ -82,7 +82,6 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:
     """Отправляет изображение в Gemini и получает ключевые слова."""
     try:
-        # ИСПРАВЛЕНО: Используем актуальное название модели
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content([GEMINI_PROMPT, img])
         keywords = response.text.strip().replace("```", "").replace("`", "")
@@ -94,7 +93,6 @@ def _get_keywords_from_image_blocking(img: Image) -> str | None:
 # --- Функции для работы с TMDb ---
 def _get_item_details_blocking(item_id: int, item_type: str):
     """Получает подробную информацию о фильме или сериале."""
-    # ИСПРАВЛЕНО: Правильный формат URL
     url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers"}
     r = requests.get(url, params=params, timeout=20)
@@ -111,15 +109,13 @@ def _parse_trailer(videos_data: dict) -> str | None:
 async def _enrich_item_data(item: dict, item_type: str) -> dict:
     """Обогащает данные деталями и переводом."""
     details = await asyncio.to_thread(_get_item_details_blocking, item['id'], item_type)
-    # Используем 'title' для фильмов и 'name' для сериалов для корректного перевода
     original_title = item.get("title") if item_type == 'movie' else item.get('name')
     if original_title:
-        # Пытаемся получить русское название, если доступно
         russian_title = await asyncio.to_thread(translate_text_blocking, original_title)
-        item['title_ru'] = russian_title # Сохраняем переведенное название
+        item['title_ru'] = russian_title
     
     overview_ru = await asyncio.to_thread(translate_text_blocking, item.get("overview", ""))
-    await asyncio.sleep(0.4) # Задержка для обхода лимитов API, если необходимо
+    await asyncio.sleep(0.4)
     return {
         **item,
         "item_type": item_type,
@@ -134,7 +130,6 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     for keyword in [k.strip() for k in keywords_str.split(',')]:
         if not keyword: continue
         try:
-            # ИСПРАВЛЕНО: Правильный формат URL
             search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"
             params = {"api_key": TMDB_API_KEY, "query": keyword}
             r = requests.get(search_url, params=params, timeout=10)
@@ -150,7 +145,6 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         return None
 
     try:
-        # ИСПРАВЛЕНО: Правильный формат URL
         discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         discover_params = {
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),
@@ -180,7 +174,6 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
 async def _get_todays_top_digital_releases_blocking(limit=5):
     """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    # ИСПРАВЛЕНО: Правильный формат URL
     url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
     params = {
         "api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc",
@@ -204,7 +197,6 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     start_date = datetime.now(timezone.utc) + timedelta(days=1)
     for i in range(search_days):
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
-        # ИСПРАВЛЕНО: Правильный формат URL
         url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10}
         r = requests.get(url, params=params, timeout=20)
@@ -221,7 +213,6 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
 async def _get_todays_top_series_premieres_blocking(limit=5):
     """Получает топ-N сериалов, чья премьера состоялась сегодня."""
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    # ИСПРАВЛЕНО: Правильный формат URL
     url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
     params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}
     r = requests.get(url, params=params, timeout=20)
@@ -235,7 +226,6 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
     for i in range(search_days):
         target_date = start_date + timedelta(days=i)
         target_date_str = target_date.strftime('%Y-%m-%d')
-        # ИСПРАВЛЕНО: Правильный формат URL
         url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str}
         r = requests.get(url, params=params, timeout=20)
@@ -248,7 +238,6 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
 
 async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYPE, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):
     """Форматирует данные фильма или сериала в сообщение Telegram."""
-    # Используем переведенное название, если доступно, иначе оригинальное
     title = item_data.get("title_ru") or item_data.get("title") or item_data.get("name")
     overview = item_data.get("overview")
     poster_url = item_data.get("poster_url")
@@ -393,8 +382,7 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...")
     try:
         month_day = datetime.now(timezone.utc).strftime('%m-%d')
-        # ИСПРАВЛЕНО: Правильный формат URL
-        url = f"[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
+        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}
         r = requests.get(url, params=params, timeout=20)
         base_movies = [m for m in r.json().get("results", []) if m.get("poster_path")][:3]
@@ -493,7 +481,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
     if item_type == "movie":
         genres_map = context.bot_data.get('movie_genres', {})
         animation_id = next((gid for gid, name in genres_map.items() if name.lower() == "мультфильм"), "16")
-        anime_keyword_id = "210024" # Приблизительный ID для аниме как ключевого слова, может быть неточным
+        anime_keyword_id = "210024"
         if selection_type == "genre":
             genre_id = rest[0]
             params = {"with_genres": genre_id, "without_genres": animation_id}
@@ -516,7 +504,6 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:
             await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...")
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"
-        # ИСПРАВЛЕНО: Правильный формат URL
         url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){endpoint}"
         base_params = {"api_key": TMDB_API_KEY, "language": "en-US", "sort_by": "popularity.desc", "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150, "page": 1, **params}
         r = requests.get(url, params=base_params, timeout=20)
@@ -566,19 +553,15 @@ async def reroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await find_and_send_random_item(query, context)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Анализирует отправленное фото и рекомендует фильм.
-    ИСПРАВЛЕНО: Теперь реагирует только на фото, когда бота упоминают в сообщении.
-    """
+    """Анализирует отправленное фото и рекомендует фильм."""
     if update.message and update.message.photo:
         chat_id = update.effective_chat.id
-        # Проверяем, является ли сообщение ответом на бота или содержит упоминание
         is_mentioned = False
-        if update.message.entities:
-            for entity in update.message.entities:
-                if entity.type == constants.MessageEntityType.MENTION and \
-                   update.message.text[entity.offset:entity.offset + entity.length] == f"@{context.bot.username}":
-                    is_mentioned = True
-                    break
+        bot_username = f"@{context.bot.username}"
+
+        # Проверяем упоминание в тексте сообщения (caption для фото)
+        if update.message.caption and bot_username in update.message.caption:
+            is_mentioned = True
         
         # В приватном чате всегда реагируем, в групповом - только при упоминании
         if update.effective_chat.type == constants.ChatType.PRIVATE or is_mentioned:
@@ -650,7 +633,6 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
 # --- СБОРКА И ЗАПУСК ---
 def main():
     try:
-        # ИСПРАВЛЕНО: Конфигурация Gemini API
         genai.configure(api_key=GEMINI_API_KEY)
         print("[INFO] Gemini configured successfully.")
     except Exception as e:
@@ -678,8 +660,8 @@ def main():
     application.add_handler(CommandHandler("random_series", random_series_command))
     
     # Message handler for photos
-    # ИСПРАВЛЕНО: Добавлен фильтр filters.AT_BOT для групповых чатов
-    application.add_handler(MessageHandler(filters.PHOTO & (filters.PRIVATE | filters.ChatType.GROUPS & filters.AT_BOT), photo_handler))
+    # ИСПРАВЛЕНО: Заменен filters.PRIVATE на filters.ChatType.PRIVATE и убран filters.AT_BOT
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
     # Callback query handlers
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
@@ -697,6 +679,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
