@@ -1,5 +1,5 @@
 """  
-Movie and TV show release Telegram bot with Gemini-powered image analysis for movie recommendations.  
+Movie and TV show release Telegram bot with Imagga-powered image analysis for movie recommendations.  
 """  
 
 import os  
@@ -11,9 +11,7 @@ import io
 from datetime import datetime, time, timezone, timedelta  
 from zoneinfo import ZoneInfo  
 
-# --- Новые импорты для Gemini и изображений ---  
-import google.generativeai as genai  
-from google.api_core import exceptions as google_exceptions
+# --- Новые импорты ---
 from PIL import Image  
 
 from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto  
@@ -71,41 +69,55 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
 # --- CONFIG ---  
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")  
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# ИЗМЕНЕНО: Новые переменные для Imagga
+IMAGGA_API_KEY = os.environ.get("IMAGGA_API_KEY")
+IMAGGA_API_SECRET = os.environ.get("IMAGGA_API_SECRET")
 
-if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, GEMINI_API_KEY]):  
-    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, GEMINI_API_KEY)")  
+if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, IMAGGA_API_KEY, IMAGGA_API_SECRET]):  
+    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, IMAGGA_API_KEY, IMAGGA_API_SECRET)")  
 
-# --- Промпт для Gemini ---  
-GEMINI_PROMPT = """Ты — эксперт по кинематографу с глубоким пониманием атмосферы и настроения. Проанализируй это изображение. Опиши его настроение, ключевые объекты и цветовую палитру. На основе этого анализа, предложи 5-7 ключевых слов на английском языке, которые идеально описывают атмосферу этого фото и могут быть использованы для поиска фильма с похожим настроением. Например, для фото ночного дождливого города ты мог бы предложить: 'neo-noir, detective, loneliness, metropolis, mystery'. Верни только ключевые слова, через запятую, без лишних пояснений."""  
-
-# --- Функции для работы с Gemini ---  
-def _get_keywords_from_image_blocking(img: Image) -> str | None:  
-    """Отправляет изображение в Gemini и получает ключевые слова."""  
+# --- Функции для работы с Imagga ---  
+def _get_keywords_from_image_blocking(image_bytes: bytes) -> str | None:  
+    """Отправляет изображение в Imagga и получает ключевые слова."""  
     try:  
-        model = genai.GenerativeModel('gemini-1.5-flash')  
-        response = model.generate_content([GEMINI_PROMPT, img])  
-        keywords = response.text.strip().replace("```", "").replace("`", "")  
-        return keywords  
-    except google_exceptions.NotFound as e:
-        print(f"[CRITICAL ERROR] Gemini API request failed: 404 Not Found. {e}")
-        print("-" * 50)
-        print("Это означает, что модель 'gemini-1.5-flash' недоступна для вашего проекта.")
-        print("ПОЖАЛУЙСТА, ПРОВЕРЬТЕ В GOOGLE CLOUD CONSOLE:")
-        print("1. API 'Vertex AI API' (или 'Generative Language API') включен для проекта 'projects/223392865035'.")
-        print("2. Для вашего проекта включен биллинг (оплата). Некоторые модели, включая бесплатные, могут требовать этого для защиты от злоупотреблений.")
-        print("3. Убедитесь, что у вашего API ключа нет ограничений на использование конкретных API.")
-        print("-" * 50)
-        return None
+        response = requests.post(
+            'https://api.imagga.com/v2/tags',
+            auth=(IMAGGA_API_KEY, IMAGGA_API_SECRET),
+            files={'image': image_bytes},
+            params={'language': 'en', 'limit': 15} # Запрашиваем до 15 тегов
+        )
+        response.raise_for_status()  
+        data = response.json()  
+
+        # Отбираем теги с уверенностью > 20%
+        tags = [  
+            tag['tag']['en']  
+            for tag in data.get('result', {}).get('tags', [])  
+            if tag.get('confidence', 0) > 20.0  
+        ]  
+
+        if not tags:  
+            print("[INFO] Imagga не вернул тегов с достаточной уверенностью.")  
+            return None  
+
+        # Возвращаем до 7 лучших тегов в виде строки
+        return ", ".join(tags[:7])  
+
+    except requests.exceptions.RequestException as e:  
+        print(f"[ERROR] Ошибка запроса к Imagga API: {e}")  
+        try:  
+            print(f"[ERROR] Ответ от Imagga: {response.text}")  
+        except:  
+            pass  
+        return None  
     except Exception as e:  
-        print(f"[ERROR] An unexpected Gemini API request failed: {e}")  
+        print(f"[ERROR] Неожиданная ошибка в функции Imagga: {e}")  
         return None  
 
 # --- Функции для работы с TMDb ---  
 def _get_item_details_blocking(item_id: int, item_type: str):  
     """Получает подробную информацию о фильме или сериале."""  
-    # ИСПРАВЛЕНО: Неправильный URL
-    url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"  
+    url = f"https://api.themoviedb.org/3/{item_type}/{item_id}"  
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers", "language": "ru-RU"}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -115,8 +127,7 @@ def _parse_trailer(videos_data: dict) -> str | None:
     """Извлекает URL трейлера YouTube."""  
     for video in videos_data.get("results", []):  
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":  
-            # ИСПРАВЛЕНО: Неправильный URL
-            return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video['key']}"  
+            return f"https://www.youtube.com/watch?v={video['key']}"  
     return None  
 
 async def _enrich_item_data(item: dict, item_type: str) -> dict:  
@@ -130,18 +141,16 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         "item_type": item_type,  
         "overview": overview_ru,  
         "trailer_url": _parse_trailer(details.get("videos", {})),  
-        # ИСПРАВЛЕНО: Неправильный URL
-        "poster_url": f"[https://image.tmdb.org/t/p/w780](https://image.tmdb.org/t/p/w780){item['poster_path']}"  
+        "poster_url": f"https://image.tmdb.org/t/p/w780{item['poster_path']}"  
     }  
 
 def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:  
-    """Ищет случайный фильм в TMDb по ключевым словам от Gemini."""  
+    """Ищет случайный фильм в TMDb по ключевым словам от Imagga."""  
     keyword_ids = []  
     for keyword in [k.strip() for k in keywords_str.split(',')]:  
         if not keyword: continue  
         try:  
-            # ИСПРАВЛЕНО: Неправильный URL
-            search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"  
+            search_url = "https://api.themoviedb.org/3/search/keyword"  
             params = {"api_key": TMDB_API_KEY, "query": keyword}  
             r = requests.get(search_url, params=params, timeout=10)  
             r.raise_for_status()  
@@ -152,12 +161,11 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
             print(f"[WARN] Could not find TMDb ID for keyword '{keyword}': {e}")  
             
     if not keyword_ids:  
-        print("[INFO] No valid keyword IDs found from Gemini response.")  
+        print("[INFO] No valid keyword IDs found from Imagga response.")  
         return None  
 
     try:  
-        # ИСПРАВЛЕНО: Неправильный URL
-        discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
+        discover_url = "https://api.themoviedb.org/3/discover/movie"  
         discover_params = {  
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),  
             "sort_by": "popularity.desc", "vote_average.gte": 6.0,  
@@ -181,13 +189,13 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         print(f"[ERROR] TMDb discover request failed: {e}")  
         return None  
 
+# ... (остальной код остается без изменений, т.к. он не зависит от Gemini)
 # --- Функции для релизов ---  
 
 async def _get_todays_top_digital_releases_blocking(limit=5):  
     """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    # ИСПРАВЛЕНО: Неправильный URL
-    url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
+    url = "https://api.themoviedb.org/3/discover/movie"
     params = {  
         "api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc",  
         "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str,  
@@ -210,8 +218,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     start_date = datetime.now(timezone.utc) + timedelta(days=1)  
     for i in range(search_days):  
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')  
-        # ИСПРАВЛЕНО: Неправильный URL
-        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
+        url = "https://api.themoviedb.org/3/discover/movie"
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [m for m in r.json().get("results", []) if m.get("poster_path")]  
@@ -227,8 +234,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
 async def _get_todays_top_series_premieres_blocking(limit=5):  
     """Получает топ-N сериалов, чья премьера состоялась сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    # ИСПРАВЛЕНО: Неправильный URL
-    url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"  
+    url = "https://api.themoviedb.org/3/discover/tv"
     params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -241,8 +247,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
     for i in range(search_days):  
         target_date = start_date + timedelta(days=i)  
         target_date_str = target_date.strftime('%Y-%m-%d')  
-        # ИСПРАВЛЕНО: Неправильный URL
-        url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"  
+        url = "https://api.themoviedb.org/3/discover/tv"
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [s for s in r.json().get("results", []) if s.get("poster_path")]  
@@ -250,10 +255,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
             return [await _enrich_item_data(s, 'tv') for s in releases[:limit]], target_date  
     return [], None  
 
-# --- Общие функции форматирования и обработки ---  
-
 async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYPE, title_prefix: str, is_paginated: bool = False, current_index: int = 0, total_count: int = 1, list_id: str = "", reroll_data: str = None):  
-    """Форматирует данные фильма или сериала в сообщение Telegram."""  
     title = item_data.get("title") or item_data.get("name")  
     overview = item_data.get("overview")  
     poster_url = item_data.get("poster_url")  
@@ -263,12 +265,10 @@ async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYP
     genre_names = [genres_map.get(gid, "") for gid in genre_ids[:2]]  
     genres_str = ", ".join(filter(None, genre_names))  
     trailer_url = item_data.get("trailer_url")  
-    
     text = f"{title_prefix} *{title}*\n\n"  
     if rating > 0: text += f"⭐ Рейтинг: {rating:.1f}/10\n"  
     if genres_str: text += f"Жанр: {genres_str}\n"  
     text += f"\n{overview}"  
-    
     keyboard = []  
     if is_paginated and total_count > 1:  
         nav_buttons = [  
@@ -277,24 +277,18 @@ async def format_item_message(item_data: dict, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton("➡️ Вперед", callback_data=f"page_{list_id}_{current_index + 1}") if current_index < total_count - 1 else InlineKeyboardButton(" ", callback_data="noop")  
         ]  
         keyboard.append(nav_buttons)  
-    
     action_buttons = []  
     if reroll_data: action_buttons.append(InlineKeyboardButton("🔄 Повторить", callback_data=reroll_data))  
     if trailer_url: action_buttons.append(InlineKeyboardButton("🎬 Смотреть трейлер", url=trailer_url))  
     if action_buttons: keyboard.append(action_buttons)  
-    
     return text, poster_url, InlineKeyboardMarkup(keyboard) if keyboard else None  
 
-# --- КОМАНДЫ ---  
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /start."""  
     chat_id = update.effective_chat.id  
     context.bot_data.setdefault("chat_ids", set()).add(chat_id)  
     await help_command(update, context)  
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /help."""  
     msg = (  
         "**Доступные команды:**\n\n"  
         "✨ **НОВИНКА!** Просто **отправьте мне фото и тегните меня** (`@имя_бота`), и я подберу фильм под его настроение!\n\n"  
@@ -314,7 +308,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)  
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /stop."""  
     chat_id = update.effective_chat.id  
     if chat_id in context.bot_data.setdefault("chat_ids", set()):  
         context.bot_data["chat_ids"].remove(chat_id)  
@@ -323,14 +316,12 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Этот чат и так не был подписан.")  
 
 async def releases_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /releases_movie."""  
     await update.message.reply_text("🔍 Ищу *цифровые релизы фильмов* на сегодня...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         items = await _get_todays_top_digital_releases_blocking(limit=5)  
         if not items:  
             await update.message.reply_text("🎬 Значимых цифровых релизов фильмов на сегодня не найдено.")  
             return  
-            
         list_id = str(uuid.uuid4())  
         context.bot_data.setdefault('item_lists', {})[list_id] = items  
         text, poster, markup = await format_item_message(items[0], context, "🎬 Сегодня в цифре (фильм):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)  
@@ -340,14 +331,12 @@ async def releases_movie_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Произошла ошибка при получении данных.")  
 
 async def releases_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /releases_series."""  
     await update.message.reply_text("🔍 Ищу *премьеры сериалов* на сегодня...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         items = await _get_todays_top_series_premieres_blocking(limit=5)  
         if not items:  
             await update.message.reply_text("📺 Значимых премьер сериалов на сегодня не найдено.")  
             return  
-            
         list_id = str(uuid.uuid4())  
         context.bot_data.setdefault('item_lists', {})[list_id] = items  
         text, poster, markup = await format_item_message(items[0], context, "📺 Сегодня премьера (сериал):", is_paginated=True, current_index=0, total_count=len(items), list_id=list_id)  
@@ -357,14 +346,12 @@ async def releases_series_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("Произошла ошибка при получении данных.")  
 
 async def next_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /next_movie."""  
     await update.message.reply_text("🔍 Ищу ближайшие *цифровые релизы фильмов*...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         items, release_date = await _get_next_digital_releases_blocking(limit=5)  
         if not items:  
             await update.message.reply_text("🎬 Не удалось найти цифровые релизы фильмов в ближайшие 3 месяца.")  
             return  
-            
         list_id = str(uuid.uuid4())  
         context.bot_data.setdefault('item_lists', {})[list_id] = items  
         date_str = release_date.strftime('%d.%m.%Y')  
@@ -375,14 +362,12 @@ async def next_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Произошла ошибка при поиске.")  
         
 async def next_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /next_series."""  
     await update.message.reply_text("🔍 Ищу ближайшие *премьеры сериалов*...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         items, release_date = await _get_next_series_premieres_blocking(limit=5)  
         if not items:  
             await update.message.reply_text("📺 Не удалось найти премьеры сериалов в ближайшие 3 месяца.")  
             return  
-            
         list_id = str(uuid.uuid4())  
         context.bot_data.setdefault('item_lists', {})[list_id] = items  
         date_str = release_date.strftime('%d.%m.%Y')  
@@ -393,7 +378,6 @@ async def next_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Произошла ошибка при поиске.")  
 
 async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик команды /year."""  
     if not context.args:  
         await update.message.reply_text("Укажите год после команды, например: `/year 1999`", parse_mode=constants.ParseMode.MARKDOWN)  
         return  
@@ -406,8 +390,7 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         month_day = datetime.now(timezone.utc).strftime('%m-%d')  
-        # ИСПРАВЛЕНО: Неправильный URL
-        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
+        url = "https://api.themoviedb.org/3/discover/movie"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}  
         r = requests.get(url, params=params, timeout=20)  
         base_movies = [m for m in r.json().get("results", []) if m.get("poster_path")][:3]  
@@ -424,7 +407,6 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Произошла ошибка при поиске по году.")  
 
 async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обработчик для кнопок пагинации."""  
     query = update.callback_query  
     await query.answer()  
     try:  
@@ -457,10 +439,7 @@ async def pagination_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:  
         print(f"[WARN] Failed to edit message media: {e}")  
 
-# --- Функции для случайного выбора ---  
-
 async def random_movie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Предлагает выбрать жанр для случайного фильма."""  
     genres_by_name = context.bot_data.get('movie_genres_by_name', {})  
     if not genres_by_name:  
         await update.message.reply_text("Жанры фильмов еще не загружены, попробуйте через минуту.")  
@@ -479,7 +458,6 @@ async def random_movie_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("Выберите категорию или жанр фильма:", reply_markup=InlineKeyboardMarkup(keyboard))  
 
 async def random_series_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Предлагает выбрать жанр для случайного сериала."""  
     genres_by_name = context.bot_data.get('tv_genres_by_name', {})  
     if not genres_by_name:  
         await update.message.reply_text("Жанры сериалов еще не загружены, попробуйте через минуту.")  
@@ -502,7 +480,6 @@ async def random_series_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("Выберите жанр сериала:", reply_markup=InlineKeyboardMarkup(keyboard))  
 
 async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):  
-    """Общая логика для поиска и отправки случайного фильма или сериала."""  
     data = query.data  
     action, item_type, selection_type, *rest = data.split("_")  
     api_item_type = "tv" if item_type == "tv" else "movie"  
@@ -533,8 +510,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:  
             await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...", parse_mode=constants.ParseMode.MARKDOWN)  
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"  
-        # ИСПРАВЛЕНО: Неправильный URL
-        url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){endpoint}"  
+        url = f"https://api.themoviedb.org/3/{endpoint}"  
         base_params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150, "page": 1, **params}  
         r = requests.get(url, params=base_params, timeout=20)  
         r.raise_for_status()  
@@ -565,7 +541,6 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except Exception: pass  
 
 async def random_selection_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обрабатывает ПЕРВЫЙ выбор жанра."""  
     query = update.callback_query  
     await query.answer()  
     await query.delete_message()  
@@ -578,15 +553,12 @@ async def random_selection_handler(update: Update, context: ContextTypes.DEFAULT
     await find_and_send_random_item(FakeQuery(temp_message, query.data), context)  
 
 async def reroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Обрабатывает кнопку 'Повторить'."""  
     query = update.callback_query  
     await query.answer()  
     await find_and_send_random_item(query, context)  
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    """Анализирует отправленное фото и рекомендует фильм. Срабатывает только если бота тегнули в подписи."""  
     chat_id = update.effective_chat.id  
-
     is_bot_mentioned = False
     if update.message.caption_entities:
         for entity in update.message.caption_entities:
@@ -601,12 +573,12 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            img = Image.open(io.BytesIO(photo_bytes))
-            await temp_message.edit_text("🔮 Анализирую... Подбираю ключевые слова...")
-            keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, img)
+            # ИЗМЕНЕНО: Используем новую функцию Imagga
+            await temp_message.edit_text("🔮 Анализирую фото с помощью Imagga...")
+            keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, photo_bytes)
 
             if not keywords_str:
-                await temp_message.edit_text("😔 Не смог проанализировать это изображение или настроить API. Проверьте логи.")
+                await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото или проверьте ключи Imagga.")
                 return
 
             await temp_message.edit_text(f"🔑 Нашел атмосферу: *{keywords_str}*. Ищу подходящий фильм...", parse_mode=constants.ParseMode.MARKDOWN)
@@ -627,10 +599,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[INFO] Photo handler triggered but bot not mentioned in chat {chat_id}. Ignoring.")
 
 
-# --- Ежедневные задачи ---  
-
 async def daily_movie_check_job(context: ContextTypes.DEFAULT_TYPE):  
-    """Ежедневная проверка и отправка новых цифровых релизов фильмов."""  
     print(f"[{datetime.now().isoformat()}] Running daily movie check job")  
     chat_ids = context.bot_data.get("chat_ids", set())  
     if not chat_ids: return  
@@ -647,7 +616,6 @@ async def daily_movie_check_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] Daily movie job failed: {e}")  
 
 async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):  
-    """Ежедневная проверка и отправка новых премьер сериалов."""  
     print(f"[{datetime.now().isoformat()}] Running daily series check job")  
     chat_ids = context.bot_data.get("chat_ids", set())  
     if not chat_ids: return  
@@ -665,14 +633,8 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 # --- СБОРКА И ЗАПУСК ---  
 def main():  
-    """Главная функция для запуска бота."""  
-    try:  
-        genai.configure(api_key=GEMINI_API_KEY)  
-        print("[INFO] Gemini configured successfully.")  
-    except Exception as e:  
-        print(f"[FATAL] Gemini configuration failed: {e}")  
-        return  
-        
+    # УДАЛЕНО: Конфигурация Gemini больше не нужна
+    
     persistence = PicklePersistence(filepath="bot_data.pkl")  
     application = (  
         Application.builder()  
@@ -712,6 +674,8 @@ def main():
 
 if __name__ == "__main__":  
     main()
+
+
 
 
 
