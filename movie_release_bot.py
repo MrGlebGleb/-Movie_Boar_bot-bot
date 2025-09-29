@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 # --- Новые импорты для Gemini и изображений ---  
 import google.generativeai as genai  
+from google.api_core import exceptions as google_exceptions # <-- НОВЫЙ ИМПОРТ
 from PIL import Image  
 
 from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto  
@@ -82,13 +83,24 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:  
     """Отправляет изображение в Gemini и получает ключевые слова."""  
     try:  
-        # ИСПРАВЛЕНО: Используем стандартное название мультимодальной модели из официальной документации
-        model = genai.GenerativeModel('gemini-1.5-flash')  
+        # ИЗМЕНЕНО: Возвращаемся к стандартной модели и добавляем детальную обработку ошибок.
+        model = genai.GenerativeModel('gemini-pro-vision')  
         response = model.generate_content([GEMINI_PROMPT, img])  
         keywords = response.text.strip().replace("```", "").replace("`", "")  
         return keywords  
+    # ИЗМЕНЕНО: Ловим конкретные ошибки Google API для лучшей диагностики
+    except google_exceptions.NotFound as e:
+        print(f"[CRITICAL ERROR] Gemini API request failed: 404 Not Found. {e}")
+        print("-" * 50)
+        print("Это означает, что модель 'gemini-pro-vision' недоступна для вашего проекта.")
+        print("ПОЖАЛУЙСТА, ПРОВЕРЬТЕ В GOOGLE CLOUD CONSOLE:")
+        print("1. API 'Vertex AI API' (или 'Generative Language API') включен для проекта 'projects/223392865035'.")
+        print("2. Для вашего проекта включен биллинг (оплата). Некоторые модели требуют этого.")
+        print("3. Убедитесь, что у вашего API ключа нет ограничений на использование конкретных API.")
+        print("-" * 50)
+        return None
     except Exception as e:  
-        print(f"[ERROR] Gemini API request failed: {e}")  
+        print(f"[ERROR] An unexpected Gemini API request failed: {e}")  
         return None  
 
 # --- Функции для работы с TMDb ---  
@@ -714,6 +726,13 @@ def main():
 
 if __name__ == "__main__":  
     main()
+
+
+
+
+
+
+
 
 
 
