@@ -660,7 +660,6 @@ def main():
     application.add_handler(CommandHandler("random_series", random_series_command))
     
     # Message handler for photos
-    # ИСПРАВЛЕНО: Заменен filters.PRIVATE на filters.ChatType.PRIVATE и убран filters.AT_BOT
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
     # Callback query handlers
@@ -679,6 +678,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
