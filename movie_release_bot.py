@@ -1,5 +1,5 @@
 """  
-Movie and TV show release Telegram bot with Imagga-powered image analysis for movie recommendations.  
+Movie and TV show release Telegram bot with Clarifai-powered image analysis for movie recommendations.  
 """  
 
 import os  
@@ -11,7 +11,11 @@ import io
 from datetime import datetime, time, timezone, timedelta  
 from zoneinfo import ZoneInfo  
 
-# --- Новые импорты ---
+# --- Новые импорты для Clarifai ---
+from clarifai_grpc.channel.clarifai_channel import ClarifaiChannel
+from clarifai_grpc.grpc.api import resources_pb2, service_pb2, service_pb2_grpc
+from clarifai_grpc.grpc.api.status import status_code_pb2
+
 from PIL import Image  
 
 from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto  
@@ -29,7 +33,6 @@ import translators as ts
 
 # --- Вспомогательные функции ---  
 def translate_text_blocking(text: str, to_lang='ru') -> str:  
-    """Блокирующая функция для перевода текста."""  
     if not text: return ""  
     try: return ts.translate_text(text, translator='google', to_language=to_lang)  
     except Exception as e:  
@@ -37,9 +40,7 @@ def translate_text_blocking(text: str, to_lang='ru') -> str:
         return text  
 
 async def on_startup(context: ContextTypes.DEFAULT_TYPE):  
-    """Кэширует список жанров при старте бота."""  
     print("[INFO] Caching movie and tv genres...")  
-    # Movie genres  
     try:  
         url = "https://api.themoviedb.org/3/genre/movie/list"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU"}  
@@ -51,8 +52,6 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
         print(f"[INFO] Successfully cached {len(movie_genres)} movie genres.")  
     except Exception as e:  
         print(f"[ERROR] Could not cache movie genres: {e}")  
-        context.bot_data['movie_genres'], context.bot_data['movie_genres_by_name'] = {}, {}  
-    # TV genres  
     try:  
         url = "https://api.themoviedb.org/3/genre/tv/list"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU"}  
@@ -64,59 +63,64 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
         print(f"[INFO] Successfully cached {len(tv_genres)} tv genres.")  
     except Exception as e:  
         print(f"[ERROR] Could not cache tv genres: {e}")  
-        context.bot_data['tv_genres'], context.bot_data['tv_genres_by_name'] = {}, {}  
 
 # --- CONFIG ---  
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")  
-# ИЗМЕНЕНО: Новые переменные для Imagga
-IMAGGA_API_KEY = os.environ.get("IMAGGA_API_KEY")
-IMAGGA_API_SECRET = os.environ.get("IMAGGA_API_SECRET")
+# ИЗМЕНЕНО: Новая переменная для Clarifai
+CLARIFAI_PAT = os.environ.get("CLARIFAI_PAT")
 
-if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, IMAGGA_API_KEY, IMAGGA_API_SECRET]):  
-    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, IMAGGA_API_KEY, IMAGGA_API_SECRET)")  
+if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, CLARIFAI_PAT]):  
+    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, CLARIFAI_PAT)")  
 
-# --- Функции для работы с Imagga ---  
+# --- Функции для работы с Clarifai ---  
 def _get_keywords_from_image_blocking(image_bytes: bytes) -> str | None:  
-    """Отправляет изображение в Imagga и получает ключевые слова."""  
-    try:  
-        response = requests.post(
-            'https://api.imagga.com/v2/tags',
-            auth=(IMAGGA_API_KEY, IMAGGA_API_SECRET),
-            files={'image': image_bytes},
-            params={'language': 'en', 'limit': 15} # Запрашиваем до 15 тегов
+    """Отправляет изображение в Clarifai и получает ключевые слова."""
+    try:
+        channel = ClarifaiChannel.get_grpc_channel()
+        stub = service_pb2_grpc.V2Stub(channel)
+
+        metadata = (('authorization', 'Key ' + CLARIFAI_PAT),)
+
+        request = service_pb2.PostModelOutputsRequest(
+            # Это ID общедоступной модели Clarifai для распознавания образов.
+            model_id='general-image-recognition',
+            inputs=[
+                resources_pb2.Input(
+                    data=resources_pb2.Data(
+                        image=resources_pb2.Image(
+                            base64=image_bytes
+                        )
+                    )
+                )
+            ]
         )
-        response.raise_for_status()  
-        data = response.json()  
+        response = stub.PostModelOutputs(request, metadata=metadata)
 
-        # Отбираем теги с уверенностью > 20%
-        tags = [  
-            tag['tag']['en']  
-            for tag in data.get('result', {}).get('tags', [])  
-            if tag.get('confidence', 0) > 20.0  
-        ]  
+        if response.status.code != status_code_pb2.SUCCESS:
+            print(f"[ERROR] Ошибка от Clarifai API: {response.status.description}")
+            return None
 
-        if not tags:  
-            print("[INFO] Imagga не вернул тегов с достаточной уверенностью.")  
-            return None  
+        # Отбираем теги (концепты) с уверенностью > 0.85
+        tags = [
+            concept.name
+            for concept in response.outputs[0].data.concepts
+            if concept.value > 0.85
+        ]
+
+        if not tags:
+            print("[INFO] Clarifai не вернул тегов с достаточной уверенностью.")
+            return None
 
         # Возвращаем до 7 лучших тегов в виде строки
-        return ", ".join(tags[:7])  
+        return ", ".join(tags[:7])
 
-    except requests.exceptions.RequestException as e:  
-        print(f"[ERROR] Ошибка запроса к Imagga API: {e}")  
-        try:  
-            print(f"[ERROR] Ответ от Imagga: {response.text}")  
-        except:  
-            pass  
-        return None  
-    except Exception as e:  
-        print(f"[ERROR] Неожиданная ошибка в функции Imagga: {e}")  
-        return None  
+    except Exception as e:
+        print(f"[ERROR] Неожиданная ошибка в функции Clarifai: {e}")
+        return None
 
 # --- Функции для работы с TMDb ---  
 def _get_item_details_blocking(item_id: int, item_type: str):  
-    """Получает подробную информацию о фильме или сериале."""  
     url = f"https://api.themoviedb.org/3/{item_type}/{item_id}"  
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers", "language": "ru-RU"}  
     r = requests.get(url, params=params, timeout=20)  
@@ -124,17 +128,14 @@ def _get_item_details_blocking(item_id: int, item_type: str):
     return r.json()  
 
 def _parse_trailer(videos_data: dict) -> str | None:  
-    """Извлекает URL трейлера YouTube."""  
     for video in videos_data.get("results", []):  
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":  
             return f"https://www.youtube.com/watch?v={video['key']}"  
     return None  
 
 async def _enrich_item_data(item: dict, item_type: str) -> dict:  
-    """Обогащает данные деталями и переводом."""  
     details = await asyncio.to_thread(_get_item_details_blocking, item['id'], item_type)  
     overview_ru = details.get("overview") or await asyncio.to_thread(translate_text_blocking, item.get("overview", ""))  
-    
     await asyncio.sleep(0.4)
     return {  
         **item,  
@@ -145,7 +146,6 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
     }  
 
 def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:  
-    """Ищет случайный фильм в TMDb по ключевым словам от Imagga."""  
     keyword_ids = []  
     for keyword in [k.strip() for k in keywords_str.split(',')]:  
         if not keyword: continue  
@@ -161,7 +161,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
             print(f"[WARN] Could not find TMDb ID for keyword '{keyword}': {e}")  
             
     if not keyword_ids:  
-        print("[INFO] No valid keyword IDs found from Imagga response.")  
+        print("[INFO] No valid keyword IDs found from Clarifai response.")  
         return None  
 
     try:  
@@ -189,19 +189,12 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
         print(f"[ERROR] TMDb discover request failed: {e}")  
         return None  
 
-# ... (остальной код остается без изменений, т.к. он не зависит от Gemini)
-# --- Функции для релизов ---  
+# ... (остальной код остается без изменений)
 
 async def _get_todays_top_digital_releases_blocking(limit=5):  
-    """Получает топ-N фильмов, чей ЦИФРОВОЙ релиз состоялся сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
     url = "https://api.themoviedb.org/3/discover/movie"
-    params = {  
-        "api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc",  
-        "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str,  
-        "with_release_type": 4, "region": 'RU', "vote_count.gte": 10  
-    }  
-    
+    params = { "api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10 }  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
     releases = [m for m in r.json().get("results", []) if m.get("poster_path")]  
@@ -210,11 +203,9 @@ async def _get_todays_top_digital_releases_blocking(limit=5):
         r = requests.get(url, params=params, timeout=20)  
         r.raise_for_status()  
         releases = [m for m in r.json().get("results", []) if m.get("poster_path")]  
-    
     return [await _enrich_item_data(m, 'movie') for m in releases[:limit]]  
 
 async def _get_next_digital_releases_blocking(limit=5, search_days=90):  
-    """Находит ближайший день с цифровыми релизами фильмов."""  
     start_date = datetime.now(timezone.utc) + timedelta(days=1)  
     for i in range(search_days):  
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')  
@@ -232,7 +223,6 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     return [], None  
 
 async def _get_todays_top_series_premieres_blocking(limit=5):  
-    """Получает топ-N сериалов, чья премьера состоялась сегодня."""  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
     url = "https://api.themoviedb.org/3/discover/tv"
     params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}  
@@ -242,7 +232,6 @@ async def _get_todays_top_series_premieres_blocking(limit=5):
     return [await _enrich_item_data(s, 'tv') for s in releases[:limit]]  
 
 async def _get_next_series_premieres_blocking(limit=5, search_days=90):  
-    """Находит ближайший день с премьерами сериалов."""  
     start_date = datetime.now(timezone.utc) + timedelta(days=1)  
     for i in range(search_days):  
         target_date = start_date + timedelta(days=i)  
@@ -289,22 +278,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await help_command(update, context)  
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
-    msg = (  
-        "**Доступные команды:**\n\n"  
-        "✨ **НОВИНКА!** Просто **отправьте мне фото и тегните меня** (`@имя_бота`), и я подберу фильм под его настроение!\n\n"  
-        "🎬 **Фильмы**\n"  
-        "• `/releases_movie` — цифровые релизы фильмов сегодня.\n"  
-        "• `/next_movie` — ближайшие цифровые релизы фильмов.\n"  
-        "• `/random_movie` — случайный фильм по жанру.\n\n"  
-        "📺 **Сериалы**\n"  
-        "• `/releases_series` — премьеры новых сериалов сегодня.\n"  
-        "• `/next_series` — ближайшие премьеры сериалов.\n"  
-        "• `/random_series` — случайный сериал по жанру.\n\n"  
-        "🎲 **Прочее**\n"  
-        "• `/year <год>` — что выходило в этот день раньше.\n"  
-        "• `/stop` — отписаться от ежедневной рассылки.\n"  
-        "• `/help` — показать это сообщение."  
-    )  
+    msg = ( "**Доступные команды:**\n\n" "✨ **НОВИНКА!** Просто **отправьте мне фото и тегните меня** (`@имя_бота`), и я подберу фильм под его настроение!\n\n" "🎬 **Фильмы**\n" "• `/releases_movie` — цифровые релизы фильмов сегодня.\n" "• `/next_movie` — ближайшие цифровые релизы фильмов.\n" "• `/random_movie` — случайный фильм по жанру.\n\n" "📺 **Сериалы**\n" "• `/releases_series` — премьеры новых сериалов сегодня.\n" "• `/next_series` — ближайшие премьеры сериалов.\n" "• `/random_series` — случайный сериал по жанру.\n\n" "🎲 **Прочее**\n" "• `/year <год>` — что выходило в этот день раньше.\n" "• `/stop` — отписаться от ежедневной рассылки.\n" "• `/help` — показать это сообщение." )  
     await update.message.reply_text(msg, parse_mode=constants.ParseMode.MARKDOWN)  
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):  
@@ -569,16 +543,15 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
 
     if is_bot_mentioned:
-        temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ настроения...")
+        temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ...")
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            # ИЗМЕНЕНО: Используем новую функцию Imagga
-            await temp_message.edit_text("🔮 Анализирую фото с помощью Imagga...")
+            await temp_message.edit_text("🔮 Анализирую фото с помощью Clarifai...")
             keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, photo_bytes)
 
             if not keywords_str:
-                await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото или проверьте ключи Imagga.")
+                await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото или проверьте ваш PAT-ключ в Clarifai.")
                 return
 
             await temp_message.edit_text(f"🔑 Нашел атмосферу: *{keywords_str}*. Ищу подходящий фильм...", parse_mode=constants.ParseMode.MARKDOWN)
@@ -631,20 +604,9 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:  
         print(f"[ERROR] Daily series job failed: {e}")  
 
-# --- СБОРКА И ЗАПУСК ---  
 def main():  
-    # УДАЛЕНО: Конфигурация Gemini больше не нужна
-    
     persistence = PicklePersistence(filepath="bot_data.pkl")  
-    application = (  
-        Application.builder()  
-        .token(TELEGRAM_BOT_TOKEN)  
-        .persistence(persistence)  
-        .post_init(on_startup)  
-        .build()  
-    )  
-
-    # Command handlers  
+    application = ( Application.builder() .token(TELEGRAM_BOT_TOKEN) .persistence(persistence) .post_init(on_startup) .build() )  
     application.add_handler(CommandHandler("start", start_command))  
     application.add_handler(CommandHandler("help", help_command))  
     application.add_handler(CommandHandler("stop", stop_command))  
@@ -655,25 +617,20 @@ def main():
     application.add_handler(CommandHandler("year", year_command))  
     application.add_handler(CommandHandler("random_movie", random_movie_command))  
     application.add_handler(CommandHandler("random_series", random_series_command))  
-    
     application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionEntity(constants.MessageEntityType.MENTION), photo_handler))  
-
-    # Callback query handlers  
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))  
     application.add_handler(CallbackQueryHandler(random_selection_handler, pattern="^random_"))  
     application.add_handler(CallbackQueryHandler(reroll_handler, pattern="^reroll_"))  
     application.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern="^noop$"))  
-    
-    # Job queue  
     tz = ZoneInfo("Europe/Moscow")  
     application.job_queue.run_daily(daily_movie_check_job, time(hour=14, minute=0, tzinfo=tz), name="daily_movie_check")  
     application.job_queue.run_daily(daily_series_check_job, time(hour=14, minute=5, tzinfo=tz), name="daily_series_check")  
-
     print("[INFO] Starting bot...")  
     application.run_polling()  
 
 if __name__ == "__main__":  
     main()
+
 
 
 
