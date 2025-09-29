@@ -82,8 +82,8 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:  
     """Отправляет изображение в Gemini и получает ключевые слова."""  
     try:  
-        # ИСПРАВЛЕНО: Используем актуальное название модели  
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')  
+        # ИСПРАВЛЕНО: Используем более стабильную модель gemini-pro-vision
+        model = genai.GenerativeModel('gemini-pro-vision')  
         response = model.generate_content([GEMINI_PROMPT, img])  
         keywords = response.text.strip().replace("```", "").replace("`", "")  
         return keywords  
@@ -714,5 +714,7 @@ def main():
 
 if __name__ == "__main__":  
     main()
+
+
 
 
