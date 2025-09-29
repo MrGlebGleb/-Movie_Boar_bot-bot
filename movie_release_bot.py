@@ -1,5 +1,5 @@
 """  
-Movie and TV show release Telegram bot with Clarifai-powered image analysis for movie recommendations.  
+Movie and TV show release Telegram bot with Gemini-powered image analysis for movie recommendations.  
 """  
 
 import os  
@@ -11,11 +11,9 @@ import io
 from datetime import datetime, time, timezone, timedelta  
 from zoneinfo import ZoneInfo  
 
-# --- Новые импорты для Clarifai ---
-from clarifai_grpc.channel.clarifai_channel import ClarifaiChannel
-from clarifai_grpc.grpc.api import resources_pb2, service_pb2, service_pb2_grpc
-from clarifai_grpc.grpc.api.status import status_code_pb2
-
+# --- Новые импорты для Gemini ---
+import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from PIL import Image  
 
 from telegram import constants, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto  
@@ -67,61 +65,40 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
 # --- CONFIG ---  
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")  
-# ИЗМЕНЕНО: Новая переменная для Clarifai
-CLARIFAI_PAT = os.environ.get("CLARIFAI_PAT")
+# ИЗМЕНЕНО: Возвращаем переменную для Gemini
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, CLARIFAI_PAT]):  
-    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, CLARIFAI_PAT)")  
+if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, GEMINI_API_KEY]):  
+    raise RuntimeError("Одна или несколько переменных окружения не установлены! (TELEGRAM_BOT_TOKEN, TMDB_API_KEY, GEMINI_API_KEY)")  
 
-# --- Функции для работы с Clarifai ---  
-def _get_keywords_from_image_blocking(image_bytes: bytes) -> str | None:  
-    """Отправляет изображение в Clarifai и получает ключевые слова."""
-    try:
-        channel = ClarifaiChannel.get_grpc_channel()
-        stub = service_pb2_grpc.V2Stub(channel)
+# --- Промпт для Gemini ---  
+GEMINI_PROMPT = """Ты — эксперт по кинематографу с глубоким пониманием атмосферы и настроения. Проанализируй это изображение. Опиши его настроение, ключевые объекты и цветовую палитру. На основе этого анализа, предложи 5-7 ключевых слов на английском языке, которые идеально описывают атмосферу этого фото и могут быть использованы для поиска фильма с похожим настроением. Например, для фото ночного дождливого города ты мог бы предложить: 'neo-noir, detective, loneliness, metropolis, mystery'. Верни только ключевые слова, через запятую, без лишних пояснений."""
 
-        metadata = (('authorization', 'Key ' + CLARIFAI_PAT),)
-
-        request = service_pb2.PostModelOutputsRequest(
-            # Это ID общедоступной модели Clarifai для распознавания образов.
-            model_id='general-image-recognition',
-            inputs=[
-                resources_pb2.Input(
-                    data=resources_pb2.Data(
-                        image=resources_pb2.Image(
-                            base64=image_bytes
-                        )
-                    )
-                )
-            ]
-        )
-        response = stub.PostModelOutputs(request, metadata=metadata)
-
-        if response.status.code != status_code_pb2.SUCCESS:
-            print(f"[ERROR] Ошибка от Clarifai API: {response.status.description}")
-            return None
-
-        # Отбираем теги (концепты) с уверенностью > 0.85
-        tags = [
-            concept.name
-            for concept in response.outputs[0].data.concepts
-            if concept.value > 0.85
-        ]
-
-        if not tags:
-            print("[INFO] Clarifai не вернул тегов с достаточной уверенностью.")
-            return None
-
-        # Возвращаем до 7 лучших тегов в виде строки
-        return ", ".join(tags[:7])
-
-    except Exception as e:
-        print(f"[ERROR] Неожиданная ошибка в функции Clarifai: {e}")
+# --- Функции для работы с Gemini ---  
+def _get_keywords_from_image_blocking(img: Image) -> str | None:  
+    """Отправляет изображение в Gemini и получает ключевые слова."""  
+    try:  
+        model = genai.GenerativeModel('gemini-1.5-flash')  
+        response = model.generate_content([GEMINI_PROMPT, img])  
+        keywords = response.text.strip().replace("```", "").replace("`", "")  
+        return keywords  
+    except google_exceptions.NotFound as e:
+        print(f"[CRITICAL ERROR] Gemini API request failed: 404 Not Found. {e}")
+        print("-" * 50)
+        print("Это означает, что модель 'gemini-1.5-flash' недоступна для вашего проекта.")
+        print("ПОЖАЛУЙСТА, ПРОВЕРЬТЕ В GOOGLE CLOUD CONSOLE:")
+        print("1. API 'Vertex AI API' (или 'Generative Language API') включен для вашего проекта.")
+        print("2. Для вашего проекта включен биллинг (оплата).")
+        print("3. Убедитесь, что у вашего API ключа нет ограничений на использование конкретных API.")
+        print("-" * 50)
         return None
+    except Exception as e:  
+        print(f"[ERROR] An unexpected Gemini API request failed: {e}")  
+        return None  
 
 # --- Функции для работы с TMDb ---  
 def _get_item_details_blocking(item_id: int, item_type: str):  
-    url = f"https://api.themoviedb.org/3/{item_type}/{item_id}"  
+    url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){item_type}/{item_id}"  
     params = {"api_key": TMDB_API_KEY, "append_to_response": "videos,watch/providers", "language": "ru-RU"}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -130,7 +107,7 @@ def _get_item_details_blocking(item_id: int, item_type: str):
 def _parse_trailer(videos_data: dict) -> str | None:  
     for video in videos_data.get("results", []):  
         if video.get("type") == "Trailer" and video.get("site") == "YouTube":  
-            return f"https://www.youtube.com/watch?v={video['key']}"  
+            return f"[https://www.youtube.com/watch?v=](https://www.youtube.com/watch?v=){video['key']}"  
     return None  
 
 async def _enrich_item_data(item: dict, item_type: str) -> dict:  
@@ -142,7 +119,7 @@ async def _enrich_item_data(item: dict, item_type: str) -> dict:
         "item_type": item_type,  
         "overview": overview_ru,  
         "trailer_url": _parse_trailer(details.get("videos", {})),  
-        "poster_url": f"https://image.tmdb.org/t/p/w780{item['poster_path']}"  
+        "poster_url": f"[https://image.tmdb.org/t/p/w780](https://image.tmdb.org/t/p/w780){item['poster_path']}"  
     }  
 
 def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:  
@@ -150,7 +127,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     for keyword in [k.strip() for k in keywords_str.split(',')]:  
         if not keyword: continue  
         try:  
-            search_url = "https://api.themoviedb.org/3/search/keyword"  
+            search_url = "[https://api.themoviedb.org/3/search/keyword](https://api.themoviedb.org/3/search/keyword)"  
             params = {"api_key": TMDB_API_KEY, "query": keyword}  
             r = requests.get(search_url, params=params, timeout=10)  
             r.raise_for_status()  
@@ -161,11 +138,11 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
             print(f"[WARN] Could not find TMDb ID for keyword '{keyword}': {e}")  
             
     if not keyword_ids:  
-        print("[INFO] No valid keyword IDs found from Clarifai response.")  
+        print("[INFO] No valid keyword IDs found from Gemini response.")  
         return None  
 
     try:  
-        discover_url = "https://api.themoviedb.org/3/discover/movie"  
+        discover_url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         discover_params = {  
             "api_key": TMDB_API_KEY, "with_keywords": ",".join(keyword_ids),  
             "sort_by": "popularity.desc", "vote_average.gte": 6.0,  
@@ -193,7 +170,7 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
 
 async def _get_todays_top_digital_releases_blocking(limit=5):  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    url = "https://api.themoviedb.org/3/discover/movie"
+    url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
     params = { "api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": today_str, "release_date.lte": today_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10 }  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -209,7 +186,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
     start_date = datetime.now(timezone.utc) + timedelta(days=1)  
     for i in range(search_days):  
         target_date_str = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/movie"
+        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "release_date.gte": target_date_str, "release_date.lte": target_date_str, "with_release_type": 4, "region": 'RU', "vote_count.gte": 10}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [m for m in r.json().get("results", []) if m.get("poster_path")]  
@@ -224,7 +201,7 @@ async def _get_next_digital_releases_blocking(limit=5, search_days=90):
 
 async def _get_todays_top_series_premieres_blocking(limit=5):  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
-    url = "https://api.themoviedb.org/3/discover/tv"
+    url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
     params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": today_str, "first_air_date.lte": today_str, "vote_count.gte": 10}  
     r = requests.get(url, params=params, timeout=20)  
     r.raise_for_status()  
@@ -236,7 +213,7 @@ async def _get_next_series_premieres_blocking(limit=5, search_days=90):
     for i in range(search_days):  
         target_date = start_date + timedelta(days=i)  
         target_date_str = target_date.strftime('%Y-%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/tv"
+        url = "[https://api.themoviedb.org/3/discover/tv](https://api.themoviedb.org/3/discover/tv)"
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "first_air_date.gte": target_date_str, "first_air_date.lte": target_date_str}  
         r = requests.get(url, params=params, timeout=20)  
         releases = [s for s in r.json().get("results", []) if s.get("poster_path")]  
@@ -364,7 +341,7 @@ async def year_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Ищу топ-3 *фильма*, вышедших в этот день в {year} году...", parse_mode=constants.ParseMode.MARKDOWN)  
     try:  
         month_day = datetime.now(timezone.utc).strftime('%m-%d')  
-        url = "https://api.themoviedb.org/3/discover/movie"  
+        url = "[https://api.themoviedb.org/3/discover/movie](https://api.themoviedb.org/3/discover/movie)"  
         params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "primary_release_date.gte": f"{year}-{month_day}", "primary_release_date.lte": f"{year}-{month_day}"}  
         r = requests.get(url, params=params, timeout=20)  
         base_movies = [m for m in r.json().get("results", []) if m.get("poster_path")][:3]  
@@ -484,7 +461,7 @@ async def find_and_send_random_item(query, context: ContextTypes.DEFAULT_TYPE):
         except BadRequest:  
             await query.message.edit_caption(caption=f"🔍 Ищу новый вариант в категории {search_query_text}...", parse_mode=constants.ParseMode.MARKDOWN)  
         endpoint = "discover/movie" if item_type == "movie" else "discover/tv"  
-        url = f"https://api.themoviedb.org/3/{endpoint}"  
+        url = f"[https://api.themoviedb.org/3/](https://api.themoviedb.org/3/){endpoint}"  
         base_params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "sort_by": "popularity.desc", "include_adult": "false", "vote_average.gte": 7.5, "vote_count.gte": 150, "page": 1, **params}  
         r = requests.get(url, params=base_params, timeout=20)  
         r.raise_for_status()  
@@ -543,15 +520,17 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
 
     if is_bot_mentioned:
-        temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ...")
+        temp_message = await context.bot.send_message(chat_id, "📸 Получил фото. Отправляю на анализ в Gemini...")
         try:
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
-            await temp_message.edit_text("🔮 Анализирую фото с помощью Clarifai...")
-            keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, photo_bytes)
+            img = Image.open(io.BytesIO(photo_bytes))
+            
+            await temp_message.edit_text("🔮 Анализирую фото с помощью Gemini...")
+            keywords_str = await asyncio.to_thread(_get_keywords_from_image_blocking, img)
 
             if not keywords_str:
-                await temp_message.edit_text("😔 Не смог проанализировать это изображение. Попробуйте другое фото или проверьте ваш PAT-ключ в Clarifai.")
+                await temp_message.edit_text("😔 Не смог проанализировать это изображение. Проверьте логи на Railway - там будет инструкция по настройке Google Cloud.")
                 return
 
             await temp_message.edit_text(f"🔑 Нашел атмосферу: *{keywords_str}*. Ищу подходящий фильм...", parse_mode=constants.ParseMode.MARKDOWN)
@@ -605,6 +584,14 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] Daily series job failed: {e}")  
 
 def main():  
+    # ИЗМЕНЕНО: Возвращаем конфигурацию Gemini
+    try:  
+        genai.configure(api_key=GEMINI_API_KEY)  
+        print("[INFO] Gemini configured successfully.")  
+    except Exception as e:  
+        print(f"[FATAL] Gemini configuration failed: {e}")  
+        return  
+        
     persistence = PicklePersistence(filepath="bot_data.pkl")  
     application = ( Application.builder() .token(TELEGRAM_BOT_TOKEN) .persistence(persistence) .post_init(on_startup) .build() )  
     application.add_handler(CommandHandler("start", start_command))  
