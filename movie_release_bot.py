@@ -641,7 +641,7 @@ def main():
     # Message handler for photos
     # This filter is the correct, modern way to handle this.
     # It ensures the photo is in a group and that the bot is mentioned.
-    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS & filters.Mention(user_id=True), photo_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS & filters.Mention(), photo_handler))
 
     # Callback query handlers
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
