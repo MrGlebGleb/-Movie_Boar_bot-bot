@@ -65,7 +65,6 @@ async def on_startup(context: ContextTypes.DEFAULT_TYPE):
 # --- CONFIG ---  
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")  
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")  
-# ИЗМЕНЕНО: Возвращаем переменную для Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not all([TELEGRAM_BOT_TOKEN, TMDB_API_KEY, GEMINI_API_KEY]):  
@@ -78,7 +77,7 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:  
     """Отправляет изображение в Gemini и получает ключевые слова."""  
     try:  
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')  
         response = model.generate_content([GEMINI_PROMPT, img])  
         keywords = response.text.strip().replace("```", "").replace("`", "")  
         return keywords  
@@ -165,8 +164,6 @@ def _find_movie_by_keywords_blocking(keywords_str: str) -> dict | None:
     except Exception as e:  
         print(f"[ERROR] TMDb discover request failed: {e}")  
         return None  
-
-# ... (остальной код остается без изменений)
 
 async def _get_todays_top_digital_releases_blocking(limit=5):  
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')  
@@ -583,14 +580,34 @@ async def daily_series_check_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:  
         print(f"[ERROR] Daily series job failed: {e}")  
 
-def main():  
-    # ИЗМЕНЕНО: Возвращаем конфигурацию Gemini
-    try:  
-        genai.configure(api_key=GEMINI_API_KEY)  
-        print("[INFO] Gemini configured successfully.")  
-    except Exception as e:  
-        print(f"[FATAL] Gemini configuration failed: {e}")  
-        return  
+# НОВАЯ ФУНКЦИЯ для проверки моделей
+def check_available_models():
+    """Проверяет доступные модели Gemini"""
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        models = genai.list_models()
+        
+        print("=== ДОСТУПНЫЕ МОДЕЛИ GEMINI ===")
+        available_models = []
+        for model in models:
+            if 'generateContent' in model.supported_generation_methods:
+                available_models.append(model.name)
+                print(f"✓ {model.name}")
+        
+        print(f"Всего доступно: {len(available_models)} моделей")
+        return available_models
+    except Exception as e:
+        print(f"Ошибка при проверке моделей: {e}")
+        return []
+
+def main():
+    # ИЗМЕНЕНО: Вызываем проверку моделей при старте
+    print("Проверяю доступные модели Gemini...")
+    available_models = check_available_models()
+    
+    if not available_models:
+        print("[FATAL] Нет доступных моделей Gemini! Проверьте API ключ и настройки.")
+        return
         
     persistence = PicklePersistence(filepath="bot_data.pkl")  
     application = ( Application.builder() .token(TELEGRAM_BOT_TOKEN) .persistence(persistence) .post_init(on_startup) .build() )  
@@ -617,6 +634,8 @@ def main():
 
 if __name__ == "__main__":  
     main()
+
+
 
 
 
