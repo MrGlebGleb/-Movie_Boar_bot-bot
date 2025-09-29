@@ -638,7 +638,7 @@ def main():
     application.add_handler(CommandHandler("random_series", random_series_command))
     
     # Message handler for photos
-    application.add_handler(MessageHandler(filters.PHOTO & filters.MENTION_MYSELF, photo_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.GROUPS & filters.MENTION, photo_handler))
 
     # Callback query handlers
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
