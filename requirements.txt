@@ -3,3 +3,4 @@ requests
 translators
 google-generativeai
 Pillow
+clarifai
