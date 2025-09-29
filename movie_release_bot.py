@@ -22,7 +22,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler, # Для обработки фото
-    filters,      # Для фильтрации сообщений с фото
+    filters,       # Для фильтрации сообщений с фото
     PicklePersistence,
     ContextTypes,
 )
@@ -82,7 +82,8 @@ GEMINI_PROMPT = """Ты — эксперт по кинематографу с г
 def _get_keywords_from_image_blocking(img: Image) -> str | None:
     """Отправляет изображение в Gemini и получает ключевые слова."""
     try:
-        model = genai.GenerativeModel('gemini-pro-vision')
+        # ИСПРАВЛЕНО: Используем актуальное название модели
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         response = model.generate_content([GEMINI_PROMPT, img])
         keywords = response.text.strip().replace("```", "").replace("`", "")
         return keywords
@@ -637,7 +638,7 @@ def main():
     application.add_handler(CommandHandler("random_series", random_series_command))
     
     # Message handler for photos
-    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & filters.MENTION_MYSELF, photo_handler))
 
     # Callback query handlers
     application.add_handler(CallbackQueryHandler(pagination_handler, pattern="^page_"))
@@ -655,4 +656,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
